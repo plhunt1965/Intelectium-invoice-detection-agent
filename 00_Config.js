@@ -25,6 +25,10 @@ const CONFIG = {
     BATCH_SIZE: 10,
     MAX_THREADS_PER_RUN: 50, // Maximum threads to process per execution (prevents timeout)
     MAX_EXECUTION_TIME_MS: 300000, // 5 minutes max execution time (safety limit)
+    MAX_PDF_EXTRACTION_TIME_MS: 10000, // 10 seconds max for PDF text extraction
+    MAX_INVOICE_PROCESSING_TIME_MS: 45000, // 45 seconds max per invoice (reduced from 60s to fail even faster)
+    MAX_VERTEX_AI_CALL_TIME_MS: 20000, // 20 seconds max for single Vertex AI call (reduced from 30s)
+    MAX_RATE_LIMITER_WAIT_MS: 10000, // 10 seconds max wait for rate limiter (reduced from 15s)
     
     // Email Search Date Configuration
     SEARCH_START_DATE: '2025-10-01', // Fecha de inicio (YYYY-MM-DD)

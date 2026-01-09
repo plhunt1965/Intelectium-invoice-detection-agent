@@ -1,7 +1,7 @@
 /**
  * Gmail Module
  * Handles email search, processing, and attachment management
- * Updated: 2026-01-09 - Added monthly search, limits set to 500 (Gmail max)
+ * Updated: 2026-01-09 - Added monthly search, pagination for >500 emails, limits 500 per page
  */
 
 const GmailManager = {
@@ -350,14 +350,39 @@ const GmailManager = {
       let query = `label:${labelName}`;
       query = this._buildDateQuery(query, dateRange);
       
-      // Gmail API maximum limit is 500
-      const threads = GmailApp.search(query, 0, 500);
+      // Gmail API maximum limit is 500 per call - implement pagination to get all results
+      const allThreads = [];
+      let start = 0;
+      const maxPerPage = 500;
+      let hasMore = true;
       
-      Log.debug('Searched with label and date filters', {
+      while (hasMore) {
+        const threads = GmailApp.search(query, start, maxPerPage);
+        allThreads.push(...threads);
+        
+        // If we got less than maxPerPage, we've reached the end
+        if (threads.length < maxPerPage) {
+          hasMore = false;
+        } else {
+          start += maxPerPage;
+          // Safety limit: don't fetch more than 5000 threads total
+          if (allThreads.length >= 5000) {
+            Log.warn('Reached safety limit of 5000 threads for label search', {
+              labelName: labelName
+            });
+            hasMore = false;
+          }
+        }
+      }
+      
+      Log.debug('Searched with label and date filters (with pagination)', {
         labelName: labelName,
-        found: threads.length,
+        found: allThreads.length,
+        pages: Math.ceil(allThreads.length / maxPerPage),
         query: query
       });
+      
+      const threads = allThreads;
       
       // Additional filter by date range (double check)
       const filteredThreads = this._filterByDateRange(threads, dateRange);
@@ -400,13 +425,37 @@ const GmailManager = {
         // Add date filters
         const query = this._buildDateQuery(baseQuery, dateRange);
         
-        // Gmail API maximum limit is 500 per keyword
-        const threads = GmailApp.search(query, 0, 500);
-        allThreads.push(...threads);
+        // Gmail API maximum limit is 500 per call - implement pagination to get all results
+        let start = 0;
+        const maxPerPage = 500;
+        let hasMore = true;
+        const keywordThreads = [];
         
-        Log.debug('Searched keyword', {
+        while (hasMore) {
+          const threads = GmailApp.search(query, start, maxPerPage);
+          keywordThreads.push(...threads);
+          
+          // If we got less than maxPerPage, we've reached the end
+          if (threads.length < maxPerPage) {
+            hasMore = false;
+          } else {
+            start += maxPerPage;
+            // Safety limit: don't fetch more than 5000 threads per keyword
+            if (keywordThreads.length >= 5000) {
+              Log.warn('Reached safety limit of 5000 threads for keyword search', {
+                keyword: keyword
+              });
+              hasMore = false;
+            }
+          }
+        }
+        
+        allThreads.push(...keywordThreads);
+        
+        Log.debug('Searched keyword (with pagination)', {
           keyword: keyword,
-          found: threads.length,
+          found: keywordThreads.length,
+          pages: Math.ceil(keywordThreads.length / maxPerPage),
           query: query
         });
         

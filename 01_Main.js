@@ -1,6 +1,7 @@
 /**
  * Main Module
  * Entry points and orchestration for Invoice Detection Agent
+ * Updated: 2026-01-09 - Added timeouts to prevent hanging
  */
 
 /**
@@ -154,15 +155,48 @@ function processThread(requestId, thread) {
         result.processed++;
         
       } catch (error) {
-        Log.error('Error processing message', {
-          error: error.message,
-          messageId: messageId
-        });
+        const isTimeout = error.message && (
+          error.message.includes('timeout') || 
+          error.message.includes('Timeout') ||
+          error.message.includes('took too long')
+        );
+        
+        if (isTimeout) {
+          Log.warn('Message processing timeout - skipping and continuing', {
+            error: error.message,
+            messageId: messageId,
+            subject: msgData.subject
+          });
+          result.skipped++;
+        } else {
+          Log.error('Error processing message', {
+            error: error.message,
+            messageId: messageId,
+            subject: msgData.subject
+          });
+        }
         // Continue with next message
+        result.processed++;
       }
     }
     
   } catch (error) {
+    const isTimeout = error.message && (
+      error.message.includes('timeout') || 
+      error.message.includes('Timeout') ||
+      error.message.includes('took too long') ||
+      error.message.includes('Maximum execution time reached')
+    );
+    
+    if (isTimeout) {
+      Log.warn('Thread processing timeout - skipping and continuing', {
+        error: error.message,
+        threadId: thread.getId()
+      });
+      // Return partial results so we continue processing
+      return result;
+    }
+    
     Log.error('Error processing thread', {
       error: error.message,
       threadId: thread.getId()
@@ -180,6 +214,9 @@ function processThread(requestId, thread) {
  * @returns {Object|null} Invoice data if successfully processed, null otherwise
  */
 function processMessage(requestId, msgData) {
+  const messageStartTime = Date.now();
+  const maxProcessingTime = CONFIG.MAX_INVOICE_PROCESSING_TIME_MS;
+  
   Log.info('Processing message', {
     messageId: msgData.messageId,
     subject: msgData.subject,
@@ -189,6 +226,14 @@ function processMessage(requestId, msgData) {
   try {
     let file = null;
     let invoiceData = null;
+    
+    // Check timeout before starting processing
+    const checkTimeout = function() {
+      const elapsed = Date.now() - messageStartTime;
+      if (elapsed > maxProcessingTime) {
+        throw new Error(`Invoice processing timeout after ${elapsed}ms (max: ${maxProcessingTime}ms)`);
+      }
+    };
     
     // Early rejection: Check for Ipronics/Intelectium in email subject/body before processing
     const emailContentForCheck = (msgData.subject || '') + ' ' + (msgData.body || '');
@@ -231,7 +276,9 @@ function processMessage(requestId, msgData) {
       file = DriveManager.saveAttachment(requestId, attachment, tempFolder);
       
       // Try to extract PDF text, combine with email body
+      checkTimeout(); // Check timeout before expensive operation
       const pdfText = VertexAI._extractTextFromPDF(requestId, file);
+      checkTimeout(); // Check timeout after expensive operation
       
       // Combine PDF text with email body
       let combinedContent = '';
@@ -254,8 +301,10 @@ function processMessage(requestId, msgData) {
       }
       
       // Use combined content
+      checkTimeout(); // Check timeout before expensive operation
       Log.info('Extracting invoice data from PDF + email body', { fileId: file.getId() });
       invoiceData = VertexAI.extractInvoiceData(requestId, combinedContent, CONFIG.MAX_RETRIES);
+      checkTimeout(); // Check timeout after expensive operation
       
       // Validate after extraction - if rejected, clean up the downloaded file
       if (!invoiceData || invoiceData.esFactura === false) {
@@ -324,7 +373,9 @@ function processMessage(requestId, msgData) {
       });
       
       // Extract invoice data from email body first
+      checkTimeout(); // Check timeout before expensive operation
       invoiceData = VertexAI.extractInvoiceData(requestId, emailContent, CONFIG.MAX_RETRIES);
+      checkTimeout(); // Check timeout after expensive operation
       
       // STRICT validation for emails without attachments:
       // 1. Must explicitly be marked as invoice (esFactura !== false)
@@ -419,11 +470,23 @@ function processMessage(requestId, msgData) {
     return invoiceData;
     
   } catch (error) {
+    const elapsed = Date.now() - messageStartTime;
     Log.error('Failed to process message', {
       error: error.message,
       messageId: msgData.messageId,
+      elapsed: elapsed + 'ms',
       stack: error.stack
     });
+    
+    // If timeout, don't throw - just skip this message and continue
+    if (error.message && error.message.includes('timeout')) {
+      Log.warn('Skipping message due to timeout', {
+        messageId: msgData.messageId,
+        elapsed: elapsed
+      });
+      return null;
+    }
+    
     throw error;
   }
 }

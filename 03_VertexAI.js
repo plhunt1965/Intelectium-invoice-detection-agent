@@ -1,6 +1,7 @@
 /**
  * Vertex AI Module
  * Handles invoice data extraction using Vertex AI Gemini 3
+ * Updated: 2026-01-09 - Aggressive timeouts: 45s per invoice, 18s per Vertex AI call, 30k char limit
  */
 
 const VertexAI = {
@@ -29,7 +30,20 @@ const VertexAI = {
      * Wait until we can make a call
      */
     waitIfNeeded: function() {
+      const waitStartTime = Date.now();
+      const maxWaitTime = CONFIG.MAX_RATE_LIMITER_WAIT_MS;
+      
       while (!this.canCall()) {
+        // Check if we've exceeded maximum wait time
+        const waitElapsed = Date.now() - waitStartTime;
+        if (waitElapsed > maxWaitTime) {
+          Log.warn('Rate limiter: Maximum wait time exceeded, proceeding anyway', {
+            waitElapsed: waitElapsed,
+            maxWaitTime: maxWaitTime
+          });
+          break;
+        }
+        
         // Safety check: if array is empty, we should be able to call
         if (this._calls.length === 0) {
           Log.warn('Rate limiter: _calls is empty but canCall() returned false, breaking loop');
@@ -44,17 +58,23 @@ const VertexAI = {
         // We need to wait until oldestCall is more than 60 seconds old
         const waitTime = Math.max(0, 60000 - ageOfOldestCall + 1000); // +1000ms buffer
         
-        if (waitTime > 0 && waitTime <= 61000) { // Sanity check: wait time should be reasonable
+        // Cap wait time to remaining max wait time
+        const remainingWaitTime = maxWaitTime - waitElapsed;
+        const actualWaitTime = Math.min(waitTime, remainingWaitTime, 30000); // Cap at 30 seconds per iteration
+        
+        if (actualWaitTime > 0 && actualWaitTime <= 30000) { // Sanity check: wait time should be reasonable
           Log.debug('Rate limit reached, waiting', { 
-            waitTime: waitTime,
+            waitTime: actualWaitTime,
             oldestCallAge: ageOfOldestCall,
-            callsInWindow: this._calls.length
+            callsInWindow: this._calls.length,
+            totalWaitElapsed: waitElapsed
           });
-          Utilities.sleep(Math.min(waitTime, 61000)); // Cap at 61 seconds max
+          Utilities.sleep(actualWaitTime);
         } else {
           // Invalid wait time - something is wrong, break to avoid infinite loop
           Log.warn('Rate limiter: Invalid wait time calculated, breaking loop', {
             waitTime: waitTime,
+            actualWaitTime: actualWaitTime,
             oldestCall: oldestCall,
             now: now,
             ageOfOldestCall: ageOfOldestCall
@@ -79,25 +99,74 @@ const VertexAI = {
     maxRetries = maxRetries || CONFIG.MAX_RETRIES;
     
     const startTime = Date.now();
+    const maxTotalTime = CONFIG.MAX_INVOICE_PROCESSING_TIME_MS - 10000; // Reserve 10s for other operations (PDF, Drive, etc)
+    const maxSingleCallTime = CONFIG.MAX_VERTEX_AI_CALL_TIME_MS;
     
     Log.info('Extracting invoice data with Vertex AI', {
-      contentLength: content ? content.length : 0
+      contentLength: content ? content.length : 0,
+      maxRetries: maxRetries,
+      maxTotalTime: maxTotalTime + 'ms',
+      maxSingleCallTime: maxSingleCallTime + 'ms'
     });
     
+    // Check timeout before starting
+    const checkTimeout = function() {
+      const elapsed = Date.now() - startTime;
+      if (elapsed > maxTotalTime) {
+        throw new Error(`Vertex AI extraction timeout after ${elapsed}ms (max: ${maxTotalTime}ms)`);
+      }
+    };
+    
+    checkTimeout();
     this._rateLimiter.waitIfNeeded();
+    checkTimeout();
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
+        checkTimeout(); // Check before each attempt
+        
         this._rateLimiter.recordCall();
         
         // Extract from text content (email body + file reference)
-        const textContent = content.substring(0, 50000);
+        // Limit to 30000 chars to prevent Vertex AI from taking too long with huge documents
+        const textContent = content.substring(0, 30000);
         const prompt = CONFIG.INVOICE_EXTRACTION_PROMPT.replace('{content}', textContent);
         
-        Log.debug('Calling Vertex AI API', { attempt: attempt, promptLength: prompt.length });
+        if (content.length > 30000) {
+          Log.warn('Content truncated for Vertex AI', {
+            originalLength: content.length,
+            truncatedLength: textContent.length
+          });
+        }
+        
+        const callStartTime = Date.now();
+        Log.debug('Calling Vertex AI API', { 
+          attempt: attempt, 
+          promptLength: prompt.length,
+          elapsed: callStartTime - startTime + 'ms',
+          maxCallTime: maxSingleCallTime + 'ms',
+          remainingTime: (maxTotalTime - (callStartTime - startTime)) + 'ms'
+        });
+        
+        // Check timeout before making the call
+        checkTimeout();
+        
+        // Add timeout check during the call - if it takes too long, abort
         const response = this._callAPI(requestId, prompt);
+        const callElapsed = Date.now() - callStartTime;
+        
+        // Double check - if the call took longer than expected, throw error immediately
+        if (callElapsed > maxSingleCallTime) {
+          throw new Error(`Vertex AI call took too long: ${callElapsed}ms (max: ${maxSingleCallTime}ms)`);
+        }
+        
+        // Also check total time elapsed
+        checkTimeout();
+        
+        checkTimeout(); // Check after API call
         
         const invoiceData = this._parseResponse(response);
+        checkTimeout(); // Check after parsing
         
         // Validate that this is actually an invoice
         if (!this._isValidInvoice(invoiceData)) {
@@ -111,13 +180,25 @@ const VertexAI = {
         Log.info('Invoice data extracted successfully', {
           proveedor: invoiceData.proveedor,
           numeroFactura: invoiceData.numeroFactura,
-          totalTime: totalTime + 'ms'
+          totalTime: totalTime + 'ms',
+          attempts: attempt
         });
         
         return invoiceData;
         
       } catch (error) {
         const elapsed = Date.now() - startTime;
+        
+        // If timeout, don't retry
+        if (error.message && error.message.includes('timeout')) {
+          Log.error('Vertex AI extraction timeout, aborting', {
+            attempt: attempt,
+            elapsed: elapsed + 'ms',
+            error: error.message
+          });
+          throw error;
+        }
+        
         Log.warn('Vertex AI extraction attempt failed', {
           attempt: attempt,
           maxRetries: maxRetries,
@@ -134,8 +215,18 @@ const VertexAI = {
           throw error;
         }
         
-        const backoffTime = Math.pow(2, attempt) * 1000;
+        // Check timeout before backoff
+        checkTimeout();
+        
+        // Reduced backoff time to fail faster (max 3 seconds between retries)
+        const backoffTime = Math.min(Math.pow(2, attempt) * 500, 3000); // Reduced: 500ms, 1000ms, 2000ms max
+        Log.debug('Waiting before retry', { 
+          backoffTime: backoffTime + 'ms',
+          attempt: attempt,
+          elapsed: Date.now() - startTime + 'ms'
+        });
         Utilities.sleep(backoffTime);
+        checkTimeout();
       }
     }
   },
@@ -149,6 +240,9 @@ const VertexAI = {
    */
   _extractTextFromPDF: function(requestId, file) {
     Log.debug('Extracting text from PDF file', { fileId: file.getId(), fileName: file.getName() });
+    
+    const startTime = Date.now();
+    const maxTime = CONFIG.MAX_PDF_EXTRACTION_TIME_MS;
     
     try {
       const fileId = file.getId();
@@ -173,6 +267,17 @@ const VertexAI = {
         const maxAttempts = 3;
         
         while (attempts < maxAttempts && !text) {
+          // Check timeout
+          const elapsed = Date.now() - startTime;
+          if (elapsed > maxTime) {
+            Log.warn('PDF extraction timeout reached', {
+              elapsed: elapsed,
+              maxTime: maxTime,
+              fileId: fileId
+            });
+            break;
+          }
+          
           try {
             // Get text from the Google Doc
             const doc = DocumentApp.openById(tempDocId);
@@ -347,7 +452,7 @@ const VertexAI = {
       },
       payload: JSON.stringify(payload),
       muteHttpExceptions: true,
-      timeout: 30000 // 30 seconds timeout (max for UrlFetchApp)
+      timeout: 18000 // 18 seconds timeout (UrlFetchApp max is 30s, but we want to fail much earlier to prevent hanging)
     };
     
     Log.debug('Calling Vertex AI', { endpoint: endpoint });
@@ -406,4 +511,3 @@ const VertexAI = {
       throw new Error('Error al parsear respuesta de Vertex AI: ' + error.message);
     }
   }
-};
