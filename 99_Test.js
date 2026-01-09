@@ -344,3 +344,115 @@ function FORCE_REPROCESS_ALL() {
   
   return results;
 }
+
+/**
+ * Diagnostic: Extract and show PDF text content from a specific invoice
+ * @param {string} fileName - Name or partial name of the file to analyze (optional, defaults to searching for Carles invoices)
+ */
+function DIAGNOSTIC_ShowPDFContent(fileName) {
+  // Default search for Carles invoices if no parameter provided
+  const searchTerm = fileName || 'Carles';
+  console.log(`🔍 Extracting PDF content for: ${searchTerm}\n`);
+  
+  const requestId = Log.init();
+  
+  try {
+    if (!CONFIG.DRIVE_ROOT_FOLDER_ID) {
+      console.log('❌ DRIVE_ROOT_FOLDER_ID not configured');
+      return;
+    }
+    
+    const rootFolder = DriveApp.getFolderById(CONFIG.DRIVE_ROOT_FOLDER_ID);
+    const allFiles = [];
+    
+    // Search in root folder
+    const rootFiles = rootFolder.getFiles();
+    while (rootFiles.hasNext()) {
+      allFiles.push(rootFiles.next());
+    }
+    
+    // Search in all subfolders
+    const folders = rootFolder.getFolders();
+    while (folders.hasNext()) {
+      const folder = folders.next();
+      const folderFiles = folder.getFiles();
+      while (folderFiles.hasNext()) {
+        allFiles.push(folderFiles.next());
+      }
+    }
+    
+    console.log(`   Found ${allFiles.length} total files in Drive\n`);
+    
+    // Find matching files
+    const matchingFiles = allFiles.filter(file => 
+      file.getName().toLowerCase().includes(searchTerm.toLowerCase())
+    );
+    
+    if (matchingFiles.length === 0) {
+      console.log(`❌ No files found matching: ${searchTerm}`);
+      console.log('\n   Available files (first 20):');
+      allFiles.slice(0, 20).forEach((file, index) => {
+        console.log(`   ${index + 1}. ${file.getName()}`);
+      });
+      return;
+    }
+    
+    console.log(`✅ Found ${matchingFiles.length} matching file(s):\n`);
+    matchingFiles.forEach((file, index) => {
+      console.log(`   ${index + 1}. ${file.getName()}`);
+      console.log(`      ID: ${file.getId()}`);
+      console.log(`      Size: ${file.getSize()} bytes`);
+    });
+    
+    // Use the first matching file
+    const foundFile = matchingFiles[0];
+    console.log(`\n📄 Analyzing first match: ${foundFile.getName()}\n`);
+    
+    console.log(`✅ Found file: ${foundFile.getName()}`);
+    console.log(`   File ID: ${foundFile.getId()}`);
+    console.log(`   File size: ${foundFile.getSize()} bytes\n`);
+    
+    // Extract text
+    const pdfText = VertexAI._extractTextFromPDF(requestId, foundFile);
+    
+    if (pdfText && pdfText.trim().length > 0) {
+      console.log('📄 EXTRACTED PDF TEXT CONTENT:');
+      console.log('='.repeat(80));
+      console.log(pdfText);
+      console.log('='.repeat(80));
+      console.log(`\nText length: ${pdfText.length} characters`);
+      
+      // Also show what would be sent to Vertex AI
+      const emailBody = 'Email body would go here';
+      const combinedContent = `CONTENIDO DEL PDF (LA FACTURA ESTÁ AQUÍ):\n${pdfText}\n\nCONTENIDO DEL EMAIL (contexto adicional):\n${emailBody}\n\n`;
+      
+      console.log('\n📤 CONTENT THAT WOULD BE SENT TO VERTEX AI:');
+      console.log('='.repeat(80));
+      console.log(combinedContent.substring(0, 2000)); // First 2000 chars
+      if (combinedContent.length > 2000) {
+        console.log(`\n... (truncated, total length: ${combinedContent.length} characters)`);
+      }
+      console.log('='.repeat(80));
+      
+      return {
+        fileName: foundFile.getName(),
+        fileId: foundFile.getId(),
+        textLength: pdfText.length,
+        extractedText: pdfText
+      };
+    } else {
+      console.log('❌ Could not extract text from PDF');
+      console.log('   Text length: ' + (pdfText ? pdfText.length : 0));
+      return {
+        fileName: foundFile.getName(),
+        fileId: foundFile.getId(),
+        error: 'Text extraction failed'
+      };
+    }
+    
+  } catch (error) {
+    console.log('❌ Error: ' + error.message);
+    console.log(error.stack);
+    return { error: error.message };
+  }
+}

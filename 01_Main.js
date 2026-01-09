@@ -94,9 +94,9 @@ function processInvoiceEmails() {
         }
       }
       
-      // Small delay between batches
+      // Small delay between batches (optimized: reduced from 500ms to 100ms)
       if (i + CONFIG.BATCH_SIZE < threadsToProcess.length) {
-        Utilities.sleep(500);
+        Utilities.sleep(100);
       }
     }
     

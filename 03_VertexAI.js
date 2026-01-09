@@ -167,34 +167,53 @@ const VertexAI = {
         );
         const tempDocId = tempDocFile.id;
         
-        // Wait a moment for conversion to complete
-        Utilities.sleep(2000);
+        // Try to extract text immediately (optimization: many conversions are fast)
+        let text = null;
+        let attempts = 0;
+        const maxAttempts = 3;
         
-        try {
-          // Get text from the Google Doc
-          const doc = DocumentApp.openById(tempDocId);
-          const text = doc.getBody().getText();
-          
-          // Clean up temp doc
-          DriveApp.getFileById(tempDocId).setTrashed(true);
-          
-          if (text && text.trim().length > 50) { // Minimum text length to be useful
-            Log.info('PDF text extracted via Google Docs conversion', { 
-              fileId: fileId,
-              textLength: text.length 
-            });
-            return text;
-          } else {
-            Log.warn('Extracted text too short or empty after Google Docs conversion', { textLength: text ? text.length : 0 });
-          }
-        } catch (e) {
-          // Clean up on error
+        while (attempts < maxAttempts && !text) {
           try {
-            DriveApp.getFileById(tempDocId).setTrashed(true);
-          } catch (cleanupError) {
-            // Ignore cleanup errors
+            // Get text from the Google Doc
+            const doc = DocumentApp.openById(tempDocId);
+            const extractedText = doc.getBody().getText();
+            
+            if (extractedText && extractedText.trim().length > 50) {
+              text = extractedText;
+              break;
+            }
+          } catch (e) {
+            // If first attempt fails, wait for conversion (optimization: reduced from 2000ms to 1000ms)
+            if (attempts === 0) {
+              Utilities.sleep(1000);
+            } else if (attempts === 1) {
+              // Second retry with additional wait
+              Utilities.sleep(1000);
+            }
+            // If still fails after retries, will fall through to cleanup
           }
-          throw e; // Re-throw to trigger fallback or retry
+          attempts++;
+        }
+        
+        // Clean up temp doc
+        try {
+          DriveApp.getFileById(tempDocId).setTrashed(true);
+        } catch (cleanupError) {
+          // Ignore cleanup errors
+        }
+        
+        if (text && text.trim().length > 50) {
+          Log.info('PDF text extracted via Google Docs conversion', { 
+            fileId: fileId,
+            textLength: text.length,
+            attempts: attempts
+          });
+          return text;
+        } else {
+          Log.warn('Extracted text too short or empty after Google Docs conversion', { 
+            textLength: text ? text.length : 0,
+            attempts: attempts
+          });
         }
       } catch (e) {
         Log.warn('Google Docs conversion failed', { error: e.message });

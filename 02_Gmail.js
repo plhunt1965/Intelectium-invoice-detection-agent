@@ -1,6 +1,7 @@
 /**
  * Gmail Module
  * Handles email search, processing, and attachment management
+ * Updated: 2026-01-09 - Added monthly search, limits set to 500 (Gmail max)
  */
 
 const GmailManager = {
@@ -28,17 +29,21 @@ const GmailManager = {
     const threads = [];
     
     try {
-      // First, search emails with priority label
+      // CRITICAL FIX: Search month by month to ensure we don't miss emails
+      // Gmail search can miss emails if there are too many in one month
+      const monthlyThreads = this._searchByMonth(requestId, dateRange, usePriorityLabel);
+      threads.push(...monthlyThreads);
+      
+      // Also do the original search as a fallback (in case monthly search misses something)
       if (usePriorityLabel && CONFIG.PRIORITY_LABEL) {
         const labelThreads = this._searchWithLabel(requestId, CONFIG.PRIORITY_LABEL, dateRange);
         threads.push(...labelThreads);
-        Log.info('Found emails with priority label', { count: labelThreads.length });
+        Log.info('Found emails with priority label (fallback)', { count: labelThreads.length });
       }
       
-      // Then search by keywords
       const keywordThreads = this._searchByKeywords(requestId, dateRange);
       threads.push(...keywordThreads);
-      Log.info('Found emails by keywords', { count: keywordThreads.length });
+      Log.info('Found emails by keywords (fallback)', { count: keywordThreads.length });
       
       // Remove duplicates
       const uniqueThreads = this._deduplicateThreads(threads);
@@ -46,9 +51,12 @@ const GmailManager = {
       // Filter by date range (additional check since Gmail search may not be perfect)
       const filteredThreads = this._filterByDateRange(uniqueThreads, dateRange);
       
+      // Log breakdown by month for debugging
+      const monthBreakdown = this._getMonthBreakdown(filteredThreads);
       Log.info('Total unique invoice threads found', { 
         count: filteredThreads.length,
-        beforeFilter: uniqueThreads.length
+        beforeFilter: uniqueThreads.length,
+        byMonth: monthBreakdown
       });
       
       return filteredThreads;
@@ -183,26 +191,143 @@ const GmailManager = {
       const messages = thread.getMessages();
       if (messages.length === 0) continue;
       
-      // Use the most recent message date
-      const latestMessage = messages[messages.length - 1];
-      const messageDate = latestMessage.getDate();
+      // Check if ANY message in the thread falls within the date range
+      // This ensures we don't exclude threads that have messages from different months
+      let hasMessageInRange = false;
       
-      let include = true;
-      
-      if (dateRange.from && messageDate < dateRange.from) {
-        include = false;
+      for (const message of messages) {
+        const messageDate = message.getDate();
+        let inRange = true;
+        
+        if (dateRange.from && messageDate < dateRange.from) {
+          inRange = false;
+        }
+        
+        if (dateRange.to && messageDate > dateRange.to) {
+          inRange = false;
+        }
+        
+        if (inRange) {
+          hasMessageInRange = true;
+          break; // Found at least one message in range, include the thread
+        }
       }
       
-      if (dateRange.to && messageDate > dateRange.to) {
-        include = false;
-      }
-      
-      if (include) {
+      if (hasMessageInRange) {
         filtered.push(thread);
       }
     }
     
     return filtered;
+  },
+  
+  /**
+   * Search emails month by month to ensure we don't miss any
+   * @param {string} requestId - Request tracking ID
+   * @param {{from: Date|null, to: Date|null}} dateRange - Date range
+   * @param {boolean} usePriorityLabel - Whether to use priority label
+   * @returns {GoogleAppsScript.Gmail.GmailThread[]} Array of threads
+   * @private
+   */
+  _searchByMonth: function(requestId, dateRange, usePriorityLabel) {
+    if (!dateRange.from || !dateRange.to) {
+      // If no date range, fall back to regular search
+      return [];
+    }
+    
+    const allThreads = [];
+    const startDate = new Date(dateRange.from);
+    const endDate = new Date(dateRange.to);
+    
+    // Generate list of months to search
+    const months = [];
+    let currentDate = new Date(startDate);
+    currentDate.setDate(1); // Start of month
+    
+    while (currentDate <= endDate) {
+      const monthStart = new Date(currentDate);
+      monthStart.setHours(0, 0, 0, 0);
+      
+      const monthEnd = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
+      monthEnd.setHours(23, 59, 59, 999);
+      
+      // Don't search beyond the configured end date
+      if (monthEnd > endDate) {
+        monthEnd.setTime(endDate.getTime());
+      }
+      
+      months.push({
+        start: monthStart,
+        end: monthEnd,
+        label: Utilities.formatDate(monthStart, Session.getScriptTimeZone(), 'yyyy-MM')
+      });
+      
+      // Move to next month
+      currentDate.setMonth(currentDate.getMonth() + 1);
+    }
+    
+    Log.info('Searching month by month', { 
+      monthCount: months.length,
+      months: months.map(m => m.label)
+    });
+    
+    // Search each month separately
+    for (const month of months) {
+      const monthRange = { from: month.start, to: month.end };
+      let monthThreads = [];
+      
+      // Search with label if enabled
+      if (usePriorityLabel && CONFIG.PRIORITY_LABEL) {
+        const labelThreads = this._searchWithLabel(requestId, CONFIG.PRIORITY_LABEL, monthRange);
+        monthThreads.push(...labelThreads);
+      }
+      
+      // Search by keywords for this month
+      const keywordThreads = this._searchByKeywords(requestId, monthRange);
+      monthThreads.push(...keywordThreads);
+      
+      // Remove duplicates within this month
+      const uniqueMonthThreads = this._deduplicateThreads(monthThreads);
+      
+      // Filter by date range
+      const filteredMonthThreads = this._filterByDateRange(uniqueMonthThreads, monthRange);
+      
+      Log.info('Found emails for month', {
+        month: month.label,
+        count: filteredMonthThreads.length,
+        beforeFilter: uniqueMonthThreads.length
+      });
+      
+      allThreads.push(...filteredMonthThreads);
+    }
+    
+    return allThreads;
+  },
+  
+  /**
+   * Get breakdown of threads by month for debugging
+   * @param {GoogleAppsScript.Gmail.GmailThread[]} threads - Array of threads
+   * @returns {Object} Breakdown by month
+   * @private
+   */
+  _getMonthBreakdown: function(threads) {
+    const breakdown = {};
+    
+    for (const thread of threads) {
+      const messages = thread.getMessages();
+      if (messages.length === 0) continue;
+      
+      // Use the first message date to determine month
+      const messageDate = messages[0].getDate();
+      const monthKey = Utilities.formatDate(messageDate, Session.getScriptTimeZone(), 'yyyy-MM');
+      
+      if (!breakdown[monthKey]) {
+        breakdown[monthKey] = 0;
+      }
+      breakdown[monthKey]++;
+    }
+    
+    return breakdown;
   },
   
   /**
@@ -225,8 +350,8 @@ const GmailManager = {
       let query = `label:${labelName}`;
       query = this._buildDateQuery(query, dateRange);
       
-      // Search with date filters applied
-      const threads = GmailApp.search(query, 0, 100);
+      // Gmail API maximum limit is 500
+      const threads = GmailApp.search(query, 0, 500);
       
       Log.debug('Searched with label and date filters', {
         labelName: labelName,
@@ -267,13 +392,16 @@ const GmailManager = {
     
     for (const keyword of CONFIG.SEARCH_KEYWORDS) {
       try {
-        // Build base query
-        const baseQuery = `subject:${keyword} is:unread OR subject:${keyword} label:${CONFIG.PRIORITY_LABEL || 'inbox'}`;
+        // Build base query - search for keyword in subject
+        // Remove the "is:unread" restriction to find ALL emails (read and unread)
+        // This ensures we find invoices from October/November even if they were read
+        const baseQuery = `subject:${keyword}`;
         
         // Add date filters
         const query = this._buildDateQuery(baseQuery, dateRange);
         
-        const threads = GmailApp.search(query, 0, 50); // Up to 50 per keyword
+        // Gmail API maximum limit is 500 per keyword
+        const threads = GmailApp.search(query, 0, 500);
         allThreads.push(...threads);
         
         Log.debug('Searched keyword', {
