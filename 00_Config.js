@@ -61,22 +61,8 @@ const CONFIG = {
     - Si algún campo no se puede determinar, usa null para valores numéricos y "" para strings.
     - El número de factura es CRÍTICO - debe estar presente en la factura. Si no se encuentra, intenta inferirlo o déjalo en "".
     - La fecha debe ser la fecha de la factura, no la fecha del email.
-    
-    EXTRACCIÓN DE IMPORTES:
-    - "importeSinIVA": Busca términos como "Base imponible", "Subtotal", "Neto", "Suma (neto)", "Importe base", "Base". Es el importe ANTES de aplicar IVA.
-    - "iva": Busca específicamente el IMPORTE del IVA (no el porcentaje). Puede aparecer como:
-      * "I.V.A." o "IVA" seguido de un número (ej: "I.V.A. 163,38" o "IVA: 163,38")
-      * En una línea de resumen como "I.V.A. 163,38" o "IVA 163,38"
-      * En formato tabla con el importe del IVA
-      * Busca el VALOR NUMÉRICO del IVA, no el porcentaje (ej: si dice "21% IVA sobre 778,00 = 163,38", el IVA es 163,38)
-      * Si aparece "XX% IVA SOBRE YYY" seguido de un importe, ese importe ES el IVA
-    - "importeTotal": Busca términos como "Total", "Suma Total", "Total a pagar", "Importe total", "Total factura". Es el importe FINAL incluyendo IVA.
-    
-    IMPORTANTE PARA IVA:
-    - El campo "iva" debe ser el IMPORTE del IVA en euros (ej: 163,38), NO el porcentaje (ej: 21).
-    - Si la factura muestra "21% IVA sobre 778,00 = 163,38", entonces iva = 163,38.
-    - Si aparece una línea como "I.V.A. 163,38" o "IVA: 163,38", ese es el valor a extraer.
-    - Busca en secciones de resumen, totales, o líneas que contengan "IVA" o "I.V.A." seguido de un número.
-    
+    - Para "importeSinIVA", busca términos como "Base imponible", "Subtotal", "Neto", "Suma (neto)", "Importe base", "Base". Es el importe ANTES de aplicar IVA.
+    - Para "iva", busca el IMPORTE del IVA (no el porcentaje). Puede aparecer como "I.V.A.", "IVA", "I.V.A.:", "IVA:" seguido de un número. Si aparece "XX% IVA SOBRE YYY = ZZZ", entonces el IVA es ZZZ. Busca en líneas de resumen o totales.
+    - Para "importeTotal", busca términos como "Total", "Suma Total", "Total a pagar", "Importe total", "Total factura". Es el importe FINAL incluyendo IVA.
     - Asegúrate de que el JSON sea válido y no incluyas texto adicional fuera del JSON.`
   };
