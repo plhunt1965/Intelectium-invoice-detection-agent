@@ -72,13 +72,21 @@ const GmailManager = {
     let fromDate = null;
     let toDate = new Date(); // Default to today
     
-    // Parse start date
+    // Parse start date - ensure it's at start of day in local timezone
     if (CONFIG.SEARCH_START_DATE) {
       try {
-        fromDate = new Date(CONFIG.SEARCH_START_DATE);
-        Log.debug('Using configured start date', { 
-          date: Utilities.formatDate(fromDate, Session.getScriptTimeZone(), 'yyyy-MM-dd')
-        });
+        // Parse date string (YYYY-MM-DD) and set to start of day in local timezone
+        const dateParts = CONFIG.SEARCH_START_DATE.split('-');
+        if (dateParts.length === 3) {
+          fromDate = new Date(parseInt(dateParts[0]), parseInt(dateParts[1]) - 1, parseInt(dateParts[2]));
+          fromDate.setHours(0, 0, 0, 0);
+          Log.debug('Using configured start date', { 
+            date: Utilities.formatDate(fromDate, Session.getScriptTimeZone(), 'yyyy-MM-dd'),
+            original: CONFIG.SEARCH_START_DATE
+          });
+        } else {
+          throw new Error('Invalid date format');
+        }
       } catch (error) {
         Log.warn('Invalid SEARCH_START_DATE format', { 
           error: error.message,
@@ -87,21 +95,32 @@ const GmailManager = {
       }
     }
     
-    // Parse end date
+    // Parse end date - ensure it's at end of day in local timezone
     if (CONFIG.SEARCH_END_DATE) {
       try {
-        toDate = new Date(CONFIG.SEARCH_END_DATE);
-        // Set to end of day
-        toDate.setHours(23, 59, 59, 999);
-        Log.debug('Using configured end date', { 
-          date: Utilities.formatDate(toDate, Session.getScriptTimeZone(), 'yyyy-MM-dd')
-        });
+        // Parse date string (YYYY-MM-DD) and set to end of day in local timezone
+        const dateParts = CONFIG.SEARCH_END_DATE.split('-');
+        if (dateParts.length === 3) {
+          toDate = new Date(parseInt(dateParts[0]), parseInt(dateParts[1]) - 1, parseInt(dateParts[2]));
+          toDate.setHours(23, 59, 59, 999);
+          Log.debug('Using configured end date', { 
+            date: Utilities.formatDate(toDate, Session.getScriptTimeZone(), 'yyyy-MM-dd'),
+            original: CONFIG.SEARCH_END_DATE
+          });
+        } else {
+          throw new Error('Invalid date format');
+        }
       } catch (error) {
         Log.warn('Invalid SEARCH_END_DATE format, using today', { 
           error: error.message,
           date: CONFIG.SEARCH_END_DATE
         });
+        toDate = new Date();
+        toDate.setHours(23, 59, 59, 999);
       }
+    } else {
+      // If no end date, use today at end of day
+      toDate.setHours(23, 59, 59, 999);
     }
     
     return {
@@ -121,14 +140,26 @@ const GmailManager = {
     let query = baseQuery;
     
     // Gmail date format: YYYY/MM/DD
+    // Note: "after:YYYY/MM/DD" includes that day (emails on or after that date)
+    // Note: "before:YYYY/MM/DD" excludes that day (emails before that date)
+    // To include the end date, we need to use the day AFTER as "before"
     if (dateRange.from) {
       const fromStr = Utilities.formatDate(dateRange.from, Session.getScriptTimeZone(), 'yyyy/MM/dd');
       query += ` after:${fromStr}`;
+      Log.debug('Added date filter (after)', { date: fromStr });
     }
     
     if (dateRange.to) {
-      const toStr = Utilities.formatDate(dateRange.to, Session.getScriptTimeZone(), 'yyyy/MM/dd');
+      // To include the end date, we need to add 1 day and use "before"
+      // Example: to include 2025/12/31, we use before:2026/01/01
+      const nextDay = new Date(dateRange.to);
+      nextDay.setDate(nextDay.getDate() + 1);
+      const toStr = Utilities.formatDate(nextDay, Session.getScriptTimeZone(), 'yyyy/MM/dd');
       query += ` before:${toStr}`;
+      Log.debug('Added date filter (before)', { 
+        endDate: Utilities.formatDate(dateRange.to, Session.getScriptTimeZone(), 'yyyy/MM/dd'),
+        beforeDate: toStr
+      });
     }
     
     return query;
@@ -190,13 +221,30 @@ const GmailManager = {
         return [];
       }
       
-      // Get threads from label
-      let threads = label.getThreads(0, 100); // Get up to 100 threads
+      // Build query with label and date filters
+      let query = `label:${labelName}`;
+      query = this._buildDateQuery(query, dateRange);
       
-      // Filter by date range
-      threads = this._filterByDateRange(threads, dateRange);
+      // Search with date filters applied
+      const threads = GmailApp.search(query, 0, 100);
       
-      return threads;
+      Log.debug('Searched with label and date filters', {
+        labelName: labelName,
+        found: threads.length,
+        query: query
+      });
+      
+      // Additional filter by date range (double check)
+      const filteredThreads = this._filterByDateRange(threads, dateRange);
+      
+      if (filteredThreads.length !== threads.length) {
+        Log.warn('Date filter removed some threads', {
+          before: threads.length,
+          after: filteredThreads.length
+        });
+      }
+      
+      return filteredThreads;
       
     } catch (error) {
       Log.warn('Error searching with label', {
