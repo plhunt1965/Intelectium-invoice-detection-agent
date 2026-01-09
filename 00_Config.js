@@ -60,7 +60,7 @@ const CONFIG = {
     REGLAS:
     - Si algún campo no se puede determinar, usa null para valores numéricos y "" para strings.
     - El número de factura es CRÍTICO - debe estar presente en la factura. Si no se encuentra, intenta inferirlo o déjalo en "".
-    - La fecha debe ser la fecha de la factura, no la fecha del email.
+    - La fecha de factura (fechaFactura) es CRÍTICA - DEBE ser la fecha que aparece en la factura misma, NO la fecha del email. Busca campos como "Fecha", "Fecha de emisión", "Fecha factura", "Date", "Fecha de facturación". El formato DEBE ser YYYY-MM-DD (ejemplo: 2025-10-15). Si la factura muestra "15/10/2025" o "15-10-2025", conviértela a "2025-10-15". Si la factura muestra solo mes y año, usa el día 01 (ejemplo: "Octubre 2025" → "2025-10-01").
     - Para "importeSinIVA", busca términos como "Base imponible", "Subtotal", "Neto", "Suma (neto)", "Importe base", "Base". Es el importe ANTES de aplicar IVA.
     - Para "iva", busca el IMPORTE del IVA (no el porcentaje). Puede aparecer como "I.V.A.", "IVA", "I.V.A.:", "IVA:" seguido de un número. Si aparece "XX% IVA SOBRE YYY = ZZZ", entonces el IVA es ZZZ. Busca en líneas de resumen o totales.
     - Para "importeTotal", busca términos como "Total", "Suma Total", "Total a pagar", "Importe total", "Total factura". Es el importe FINAL incluyendo IVA.

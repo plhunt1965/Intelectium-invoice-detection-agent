@@ -276,6 +276,14 @@ function processMessage(requestId, msgData) {
       const invoiceDate = _getInvoiceDate(invoiceData, msgData.date);
       const folder = DriveManager.getOrCreateMonthFolder(requestId, invoiceDate);
       
+      // Log which date was used for debugging
+      Log.info('Determined month folder', {
+        fechaFactura: invoiceData.fechaFactura || 'NOT EXTRACTED',
+        messageDate: msgData.date ? Utilities.formatDate(msgData.date, Session.getScriptTimeZone(), 'yyyy-MM-dd') : 'N/A',
+        usedDate: Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), 'yyyy-MM-dd'),
+        folderName: folder.getName()
+      });
+      
       // Move file to correct month folder if it's not already there
       if (file.getParents().hasNext()) {
         const currentParent = file.getParents().next();
@@ -331,6 +339,14 @@ function processMessage(requestId, msgData) {
         // Get month folder using invoice date (preferred) or message date (fallback)
         const invoiceDate = _getInvoiceDate(invoiceData, msgData.date);
         const folder = DriveManager.getOrCreateMonthFolder(requestId, invoiceDate);
+        
+        // Log which date was used for debugging
+        Log.info('Determined month folder', {
+          fechaFactura: invoiceData.fechaFactura || 'NOT EXTRACTED',
+          messageDate: msgData.date ? Utilities.formatDate(msgData.date, Session.getScriptTimeZone(), 'yyyy-MM-dd') : 'N/A',
+          usedDate: Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), 'yyyy-MM-dd'),
+          folderName: folder.getName()
+        });
         
         file = PDFGenerator.createFromEmailBody(
           requestId,
@@ -423,33 +439,71 @@ function _getInvoiceDate(invoiceData, messageDate) {
   // Prefer invoice date from extracted data
   if (invoiceData && invoiceData.fechaFactura) {
     try {
+      // Clean the date string - remove any extra whitespace or characters
+      const cleanDate = invoiceData.fechaFactura.trim();
+      
       // Parse date string (YYYY-MM-DD)
-      const dateParts = invoiceData.fechaFactura.split('-');
+      const dateParts = cleanDate.split('-');
       if (dateParts.length === 3) {
-        const invoiceDate = new Date(
-          parseInt(dateParts[0]), 
-          parseInt(dateParts[1]) - 1, 
-          parseInt(dateParts[2])
-        );
+        const year = parseInt(dateParts[0], 10);
+        const month = parseInt(dateParts[1], 10) - 1; // Month is 0-indexed
+        const day = parseInt(dateParts[2], 10);
+        
+        // Validate parsed values
+        if (isNaN(year) || isNaN(month) || isNaN(day)) {
+          throw new Error('Invalid date parts: ' + JSON.stringify(dateParts));
+        }
+        
+        // Validate reasonable date ranges
+        if (year < 2000 || year > 2100) {
+          throw new Error('Year out of range: ' + year);
+        }
+        if (month < 0 || month > 11) {
+          throw new Error('Month out of range: ' + (month + 1));
+        }
+        if (day < 1 || day > 31) {
+          throw new Error('Day out of range: ' + day);
+        }
+        
+        const invoiceDate = new Date(year, month, day);
         invoiceDate.setHours(12, 0, 0, 0); // Set to noon to avoid timezone issues
-        Log.debug('Using invoice date from extracted data', {
+        
+        // Verify the date was created correctly
+        if (invoiceDate.getFullYear() !== year || 
+            invoiceDate.getMonth() !== month || 
+            invoiceDate.getDate() !== day) {
+          throw new Error('Date validation failed after creation');
+        }
+        
+        Log.info('Using invoice date from extracted data', {
           fechaFactura: invoiceData.fechaFactura,
-          parsedDate: Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), 'yyyy-MM-dd')
+          parsedDate: Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), 'yyyy-MM-dd'),
+          yearMonth: Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), 'yyyy-MM')
         });
         return invoiceDate;
+      } else {
+        throw new Error('Date format invalid - expected YYYY-MM-DD, got: ' + cleanDate);
       }
     } catch (error) {
       Log.warn('Failed to parse invoice date, using message date', {
         fechaFactura: invoiceData.fechaFactura,
-        error: error.message
+        error: error.message,
+        messageDate: messageDate ? Utilities.formatDate(messageDate, Session.getScriptTimeZone(), 'yyyy-MM-dd') : 'N/A'
       });
     }
+  } else {
+    Log.warn('No fechaFactura in invoice data, using fallback', {
+      hasInvoiceData: !!invoiceData,
+      fechaFactura: invoiceData ? invoiceData.fechaFactura : 'N/A',
+      messageDate: messageDate ? Utilities.formatDate(messageDate, Session.getScriptTimeZone(), 'yyyy-MM-dd') : 'N/A'
+    });
   }
   
   // Fallback to message date or current date
   const fallbackDate = messageDate || new Date();
-  Log.debug('Using fallback date for folder', {
+  Log.info('Using fallback date for folder', {
     date: Utilities.formatDate(fallbackDate, Session.getScriptTimeZone(), 'yyyy-MM-dd'),
+    yearMonth: Utilities.formatDate(fallbackDate, Session.getScriptTimeZone(), 'yyyy-MM'),
     source: messageDate ? 'message date' : 'current date'
   });
   return fallbackDate;
