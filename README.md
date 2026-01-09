@@ -2,7 +2,7 @@
 
 Sistema automatizado de Google Apps Script para detectar, procesar y registrar facturas desde Gmail usando Vertex AI.
 
-## ✅ Versión Estable (v1.1 - 2026-01-09)
+## ✅ Versión Estable (v1.3 - 2026-01-09)
 
 **Esta versión está marcada como estable y funcional.**
 
@@ -18,15 +18,22 @@ Sistema automatizado de Google Apps Script para detectar, procesar y registrar f
 - ✅ Optimizaciones de velocidad para alto volumen (1000+ emails)
 - ✅ Timeout explícito en llamadas a Vertex AI (30s)
 - ✅ Rate limiter corregido (sin cuelgues)
+- ✅ Mejora en extracción de IVA (formato simplificado)
 
 ### Cambios importantes en esta versión:
 - **Fix crítico**: Rate limiter corregido para evitar loops infinitos y cuelgues
+- **Mejora de extracción**: Prompt simplificado para mejor extracción de importes e IVA
 - **Validación previa**: Los emails sin adjuntos se validan ANTES de crear el PDF, evitando crear archivos innecesarios
 - **Limpieza automática**: PDFs rechazados por el AI se eliminan automáticamente
 - **Verificación temprana**: Rechazo de Ipronics antes de descargar PDFs (verifica nombre del archivo)
 - **Optimizaciones de velocidad**: Rate limiter optimizado, backoff reducido, timeouts explícitos
 - **Alto volumen**: Configurado para procesar hasta 1000 emails en múltiples ejecuciones (100 por ejecución)
 - **Drive API**: Servicio avanzado configurado correctamente en `appsscript.json`
+
+### Historial de versiones:
+- **v1.1** (2026-01-09): Versión inicial estable con optimizaciones
+- **v1.2** (2026-01-09): Fix crítico del rate limiter que causaba cuelgues
+- **v1.3** (2026-01-09): Mejora de extracción de importes e IVA con prompt simplificado
 
 ## 📋 Características
 
