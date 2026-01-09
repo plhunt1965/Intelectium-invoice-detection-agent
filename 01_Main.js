@@ -94,10 +94,9 @@ function processInvoiceEmails() {
         }
       }
       
-      // Minimal delay between batches (only if needed for rate limiting)
-      // With optimized rate limiter, we don't need much delay
+      // Small delay between batches
       if (i + CONFIG.BATCH_SIZE < threadsToProcess.length) {
-        Utilities.sleep(100); // Minimal delay
+        Utilities.sleep(500);
       }
     }
     

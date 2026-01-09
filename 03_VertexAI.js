@@ -29,18 +29,13 @@ const VertexAI = {
      * Wait until we can make a call
      */
     waitIfNeeded: function() {
-      // With 60 calls per minute, we can make 1 call per second
-      // Optimized for high volume: minimal wait, efficient checking
-      if (!this.canCall()) {
+      while (!this.canCall()) {
         const oldestCall = Math.min(...this._calls);
-        const elapsed = Date.now() - oldestCall;
-        const waitTime = Math.max(0, 1000 - elapsed); // Wait max 1 second
-        
-        if (waitTime > 50 && waitTime < 2000) { // Only wait if > 50ms
+        const waitTime = 60000 - (Date.now() - oldestCall) + 1000;
+        if (waitTime > 0) {
           Log.debug('Rate limit reached, waiting', { waitTime: waitTime });
-          Utilities.sleep(waitTime);
+          Utilities.sleep(Math.min(waitTime, 60000));
         }
-        // Re-check after wait
         this.canCall();
       }
     }
@@ -112,8 +107,7 @@ const VertexAI = {
           throw error;
         }
         
-        // Minimal backoff for high volume: 500ms, 1s max
-        const backoffTime = Math.min(Math.pow(2, attempt - 1) * 500, 1000);
+        const backoffTime = Math.pow(2, attempt) * 1000;
         Utilities.sleep(backoffTime);
       }
     }
@@ -146,8 +140,8 @@ const VertexAI = {
         );
         const tempDocId = tempDocFile.id;
         
-        // Wait a moment for conversion to complete (reduced to 1.5s)
-        Utilities.sleep(1500);
+        // Wait a moment for conversion to complete
+        Utilities.sleep(2000);
         
         try {
           // Get text from the Google Doc

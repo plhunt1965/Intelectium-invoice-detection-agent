@@ -20,11 +20,11 @@ const CONFIG = {
     ],
     
     // Processing Configuration
-    MAX_RETRIES: 2, // Reduced from 3 to speed up processing (fail fast)
+    MAX_RETRIES: 3,
     RATE_LIMIT_CALLS_PER_MINUTE: 60,
-    BATCH_SIZE: 20, // Increased from 10 for better throughput
-    MAX_THREADS_PER_RUN: 100, // Increased from 50 - will process in multiple runs for 1000 emails
-    MAX_EXECUTION_TIME_MS: 330000, // 5.5 minutes (closer to 6 min GAS limit, but with safety margin)
+    BATCH_SIZE: 10,
+    MAX_THREADS_PER_RUN: 50, // Maximum threads to process per execution (prevents timeout)
+    MAX_EXECUTION_TIME_MS: 300000, // 5 minutes max execution time (safety limit)
     
     // Email Search Date Configuration
     SEARCH_START_DATE: '2025-10-01', // Fecha de inicio (YYYY-MM-DD)
@@ -36,48 +36,31 @@ const CONFIG = {
     DEBUG_MODE: false,
     
     // Vertex AI Prompt Template
-    INVOICE_EXTRACTION_PROMPT: `IMPORTANTE: Solo analiza si el contenido es una FACTURA REAL RECIBIDA. 
-
-CONTENIDO:
-{content}
-
-INSTRUCCIONES:
-1. Si es SOLO un email de confirmación, marketing, publicidad, o notificación SIN la factura (ej: "confirmación de pago", "recibirás tu factura", "ahorra con tu factura", "ya tienes disponible tu factura"), responde: {"esFactura": false}
-
-2. Si la factura es EMITIDA POR INTELECTIUM o IPRONICS hacia un cliente (no recibida), responde: {"esFactura": false}
-
-3. Si ES una factura RECIBIDA (de un proveedor hacia Intelectium), extrae TODA la información:
-
-{
-  "esFactura": true,
-  "proveedor": "<nombre completo del proveedor que emite la factura>",
-  "fechaFactura": "<YYYY-MM-DD - fecha de la factura, no del email>",
-  "numeroFactura": "<número completo de factura>",
-  "concepto": "<descripción del servicio/producto facturado>",
-  "importeSinIVA": <número decimal sin comas, ej: 100.50>,
-  "iva": <número decimal sin comas, ej: 21.00>,
-  "importeTotal": <número decimal sin comas, ej: 121.50>
-}
-
-EXTRACCIÓN DE IMPORTES (CRÍTICO - LEE TODO EL PDF):
-- Busca en TODO el contenido del PDF, línea por línea, incluyendo tablas y listados
-- "importeSinIVA": busca términos como "Base imponible", "Subtotal", "Sin IVA", "Neto", "Base", "Importe base", "Base imponible", "Importe", "Precio", "Cuota", "Honorarios"
-- "iva": busca "IVA", "Impuesto", "Tax", "21%", "10%", "4%", o calcula si ves un porcentaje aplicado
-- "importeTotal": busca "Total", "Total a pagar", "Importe total", "Total factura", "Total a ingresar", "Total documento", "TOTAL"
-- IMPORTANTE: Si ves números con formato de moneda (€, EUR, euros) o separadores (1.234,56 o 1,234.56), conviértelos a número decimal (1234.56)
-- Si hay múltiples líneas con importes, usa los TOTALES (no subtotales parciales)
-- Si encuentras los importes, EXTRAE LOS NÚMEROS REALES EXACTOS, nunca uses 0 a menos que realmente sea 0
-
-EJEMPLOS DE BÚSQUEDA:
-- Si ves "Base imponible: 1.200,00 €" → importeSinIVA: 1200.00
-- Si ves "IVA (21%): 252,00 €" → iva: 252.00
-- Si ves "Total: 1.452,00 €" → importeTotal: 1452.00
-- Si ves "Cuota fija: 150,00" → importeTotal: 150.00 (y calcula IVA si aplica)
-
-REGLAS:
-- Si algún campo numérico NO se encuentra después de buscar exhaustivamente, usa null (nunca 0)
-- Si algún campo de texto no se encuentra, usa ""
-- Fecha SIEMPRE formato YYYY-MM-DD
-- Números con punto decimal, sin comas (ej: 121.50, no 121,50)
-- JSON válido sin texto adicional fuera del JSON`
+    INVOICE_EXTRACTION_PROMPT: `IMPORTANTE: Solo analiza si el contenido es una FACTURA REAL. Si es un email de marketing, publicidad, confirmación de pago, o cualquier otro tipo de mensaje que NO sea la factura en sí, responde con: {"esFactura": false}
+    
+    CONTENIDO:
+    {content}
+    
+    INSTRUCCIONES:
+    1. Verifica que sea una factura real (debe tener número de factura, importes, fecha, proveedor). Si el email es una confirmación de envío de factura, asume que la factura real está en el PDF adjunto y busca los datos allí.
+    2. Si NO es una factura (ej: "marketing", "publicidad", "tickets to", "win tickets"), responde: {"esFactura": false}
+    3. Si ES una factura, extrae la información y responde SOLO en formato JSON válido:
+    
+    {
+      "esFactura": true,
+      "proveedor": "<nombre del proveedor>",
+      "fechaFactura": "<YYYY-MM-DD>",
+      "numeroFactura": "<número de factura completo>",
+      "concepto": "<descripción del concepto>",
+      "importeSinIVA": <número decimal>,
+      "iva": <número decimal>,
+      "importeTotal": <número decimal>
+    }
+    
+    REGLAS:
+    - Si algún campo no se puede determinar, usa null para valores numéricos y "" para strings.
+    - El número de factura es CRÍTICO - debe estar presente en la factura. Si no se encuentra, intenta inferirlo o déjalo en "".
+    - La fecha debe ser la fecha de la factura, no la fecha del email.
+    - Para "importeSinIVA", "iva", "importeTotal", busca términos como "Base imponible", "Subtotal", "Neto", "IVA", "Total", "Total a pagar".
+    - Asegúrate de que el JSON sea válido y no incluyas texto adicional fuera del JSON.`
   };
