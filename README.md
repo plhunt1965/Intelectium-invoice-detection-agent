@@ -17,8 +17,10 @@ Sistema automatizado de Google Apps Script para detectar, procesar y registrar f
 - ✅ Verificación temprana de Ipronics en nombres de archivos
 - ✅ Optimizaciones de velocidad para alto volumen (1000+ emails)
 - ✅ Timeout explícito en llamadas a Vertex AI (30s)
+- ✅ Rate limiter corregido (sin cuelgues)
 
 ### Cambios importantes en esta versión:
+- **Fix crítico**: Rate limiter corregido para evitar loops infinitos y cuelgues
 - **Validación previa**: Los emails sin adjuntos se validan ANTES de crear el PDF, evitando crear archivos innecesarios
 - **Limpieza automática**: PDFs rechazados por el AI se eliminan automáticamente
 - **Verificación temprana**: Rechazo de Ipronics antes de descargar PDFs (verifica nombre del archivo)
