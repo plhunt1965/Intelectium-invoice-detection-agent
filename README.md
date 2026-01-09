@@ -2,7 +2,7 @@
 
 Sistema automatizado de Google Apps Script para detectar, procesar y registrar facturas desde Gmail usando Vertex AI.
 
-## ✅ Versión Estable (v1.3 - 2026-01-09)
+## ✅ Versión Estable (v1.6 - 2026-01-09)
 
 **Esta versión está marcada como estable y funcional.**
 
@@ -16,26 +16,37 @@ Sistema automatizado de Google Apps Script para detectar, procesar y registrar f
 - ✅ Limpieza automática de PDFs rechazados
 - ✅ Verificación temprana de Ipronics en nombres de archivos
 - ✅ Optimizaciones de velocidad para alto volumen (1000+ emails)
-- ✅ Timeout explícito en llamadas a Vertex AI (30s)
+- ✅ Timeout explícito en llamadas a Vertex AI (20s por llamada, 45s por factura)
 - ✅ Rate limiter corregido (sin cuelgues)
 - ✅ Mejora en extracción de IVA (formato simplificado)
 - ✅ Organización automática por mes usando fecha de factura (formato YYYY-MM)
+- ✅ Balanceo de threads por mes para procesar facturas de todos los meses
+- ✅ Validación estricta: rechaza facturas sin numeroFactura o sin importes
+- ✅ Logging mejorado de respuestas raw de Vertex AI para debugging
 
 ### Cambios importantes en esta versión:
 - **Fix crítico**: Rate limiter corregido para evitar loops infinitos y cuelgues
-- **Mejora de extracción**: Prompt simplificado para mejor extracción de importes e IVA
+- **Mejora de extracción**: Prompt completamente rediseñado con ejemplo específico de factura Carles
+- **Prompt mejorado**: Más conciso, con ejemplos concretos y reglas claras para formato de números
+- **Balanceo por mes**: Procesa threads distribuidas proporcionalmente entre meses, no solo las primeras N
+- **Validación estricta**: Rechaza facturas sin numeroFactura O sin todos los importes (antes era demasiado permisivo)
+- **Logging mejorado**: Log de respuesta raw de Vertex AI antes de parsear para debugging
+- **Normalización de números**: Conversión automática de comas a puntos en números (ej: "163,38" → 163.38)
 - **Organización por mes**: Las facturas se organizan en carpetas mensuales usando la fecha de la factura (no la del email)
 - **Validación previa**: Los emails sin adjuntos se validan ANTES de crear el PDF, evitando crear archivos innecesarios
 - **Limpieza automática**: PDFs rechazados por el AI se eliminan automáticamente
 - **Verificación temprana**: Rechazo de Ipronics antes de descargar PDFs (verifica nombre del archivo)
 - **Optimizaciones de velocidad**: Rate limiter optimizado, backoff reducido, timeouts explícitos
-- **Alto volumen**: Configurado para procesar hasta 1000 emails en múltiples ejecuciones (100 por ejecución)
+- **Alto volumen**: Configurado para procesar hasta 1000 emails en múltiples ejecuciones (50 por ejecución)
 - **Drive API**: Servicio avanzado configurado correctamente en `appsscript.json`
 
 ### Historial de versiones:
 - **v1.1** (2026-01-09): Versión inicial estable con optimizaciones
 - **v1.2** (2026-01-09): Fix crítico del rate limiter que causaba cuelgues
 - **v1.3** (2026-01-09): Mejora de extracción de importes e IVA con prompt simplificado + Organización por mes usando fecha de factura
+- **v1.4** (2026-01-09): Timeouts más agresivos y límite de contenido reducido
+- **v1.5** (2026-01-09): Versión estable antes de debugging exhaustivo
+- **v1.6** (2026-01-09): Prompt rediseñado con ejemplo Carles, balanceo por mes, validación estricta, logging mejorado
 
 ## 📋 Características
 

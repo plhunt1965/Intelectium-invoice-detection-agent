@@ -165,8 +165,33 @@ const VertexAI = {
         
         checkTimeout(); // Check after API call
         
-        const invoiceData = this._parseResponse(response);
+        const invoiceData = this._parseResponse(requestId, response);
         checkTimeout(); // Check after parsing
+        
+        // Validate and normalize numeric fields
+        if (invoiceData) {
+          // Convert string numbers to actual numbers and handle comma decimals
+          if (typeof invoiceData.importeSinIVA === 'string') {
+            invoiceData.importeSinIVA = parseFloat(invoiceData.importeSinIVA.replace(',', '.')) || null;
+          }
+          if (typeof invoiceData.iva === 'string') {
+            invoiceData.iva = parseFloat(invoiceData.iva.replace(',', '.')) || null;
+          }
+          if (typeof invoiceData.importeTotal === 'string') {
+            invoiceData.importeTotal = parseFloat(invoiceData.importeTotal.replace(',', '.')) || null;
+          }
+          
+          // Ensure numbers are properly formatted
+          if (invoiceData.importeSinIVA !== null && isNaN(invoiceData.importeSinIVA)) {
+            invoiceData.importeSinIVA = null;
+          }
+          if (invoiceData.iva !== null && isNaN(invoiceData.iva)) {
+            invoiceData.iva = null;
+          }
+          if (invoiceData.importeTotal !== null && isNaN(invoiceData.importeTotal)) {
+            invoiceData.importeTotal = null;
+          }
+        }
         
         // Validate that this is actually an invoice
         if (!this._isValidInvoice(invoiceData)) {
@@ -389,25 +414,28 @@ const VertexAI = {
       return false;
     }
     
-    // Invoice number is important but not always critical
-    // Some invoices may not have a clear number format
+    // Invoice number is CRITICAL - reject if missing
     if (!invoiceData.numeroFactura || invoiceData.numeroFactura.trim() === '') {
-      Log.warn('Invoice number is missing or empty', { 
+      Log.warn('Invoice number is missing or empty - REJECTING', { 
         proveedor: invoiceData.proveedor 
       });
-      // Still allow if we have provider and some amount data
-      if (!invoiceData.proveedor) {
-        return false;
-      }
+      return false;
     }
     
-    // Total amount should be present, but allow 0 for some cases
-    if (invoiceData.importeTotal === null || invoiceData.importeTotal === undefined) {
-      Log.warn('Missing total amount, but may still be valid invoice');
-      // Don't reject immediately - allow if we have other data
-      if (!invoiceData.proveedor && !invoiceData.numeroFactura) {
-        return false;
-      }
+    // At least one amount field must be present (importeSinIVA, iva, or importeTotal)
+    const hasAnyAmount = (invoiceData.importeSinIVA !== null && invoiceData.importeSinIVA !== undefined && invoiceData.importeSinIVA !== 0) ||
+                         (invoiceData.iva !== null && invoiceData.iva !== undefined && invoiceData.iva !== 0) ||
+                         (invoiceData.importeTotal !== null && invoiceData.importeTotal !== undefined && invoiceData.importeTotal !== 0);
+    
+    if (!hasAnyAmount) {
+      Log.warn('Missing all amount fields (importeSinIVA, iva, importeTotal) - REJECTING', {
+        proveedor: invoiceData.proveedor,
+        numeroFactura: invoiceData.numeroFactura,
+        importeSinIVA: invoiceData.importeSinIVA,
+        iva: invoiceData.iva,
+        importeTotal: invoiceData.importeTotal
+      });
+      return false;
     }
     
     // Check for common false positive patterns
@@ -491,14 +519,30 @@ const VertexAI = {
   /**
    * Parse Vertex AI response to extract JSON
    */
-  _parseResponse: function(response) {
+  _parseResponse: function(requestId, response) {
     try {
       const text = response.candidates[0].content.parts[0].text;
+      
+      // Log raw response for debugging
+      Log.debug('Vertex AI raw response', {
+        requestId: requestId,
+        responseLength: text.length,
+        firstChars: text.substring(0, 500),
+        lastChars: text.length > 500 ? text.substring(text.length - 500) : ''
+      });
       
       // Intentar encontrar un bloque de código JSON o el objeto directamente
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
+        const parsed = JSON.parse(jsonMatch[0]);
+        
+        // Log parsed data for debugging
+        Log.debug('Vertex AI parsed response', {
+          requestId: requestId,
+          parsed: parsed
+        });
+        
+        return parsed;
       }
       
       throw new Error('No se encontró un JSON válido en la respuesta del modelo');
@@ -506,7 +550,10 @@ const VertexAI = {
     } catch (error) {
       Log.error('Error al parsear respuesta de Vertex AI', {
         error: error.message,
-        texto_recibido: JSON.stringify(response).substring(0, 500)
+        requestId: requestId,
+        responseType: typeof response,
+        responseKeys: response ? Object.keys(response) : [],
+        texto_recibido: response && response.candidates && response.candidates[0] && response.candidates[0].content && response.candidates[0].content.parts && response.candidates[0].content.parts[0] ? response.candidates[0].content.parts[0].text.substring(0, 1000) : JSON.stringify(response).substring(0, 500)
       });
       throw new Error('Error al parsear respuesta de Vertex AI: ' + error.message);
     }

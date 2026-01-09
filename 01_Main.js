@@ -27,15 +27,68 @@ function processInvoiceEmails() {
       return { processed: 0, created: 0, errors: 0 };
     }
     
-    // Limit threads to prevent timeout (for 1000+ emails, will process in multiple runs)
-    const threadsToProcess = threads.slice(0, CONFIG.MAX_THREADS_PER_RUN);
-    if (threads.length > CONFIG.MAX_THREADS_PER_RUN) {
-      Log.info('Large batch detected - processing in chunks', {
+    // Balance threads by month to ensure all months are processed (not just first N threads)
+    const threadsByMonth = {};
+    threads.forEach(thread => {
+      const messages = thread.getMessages();
+      if (messages.length > 0) {
+        const latestMessage = messages[messages.length - 1];
+        const messageDate = new Date(latestMessage.getDate());
+        const yearMonth = Utilities.formatDate(messageDate, Session.getScriptTimeZone(), 'yyyy-MM');
+        
+        if (!threadsByMonth[yearMonth]) {
+          threadsByMonth[yearMonth] = [];
+        }
+        threadsByMonth[yearMonth].push(thread);
+      }
+    });
+    
+    Log.info('Threads grouped by month', {
+      months: Object.keys(threadsByMonth),
+      counts: Object.keys(threadsByMonth).map(month => ({ month: month, count: threadsByMonth[month].length }))
+    });
+    
+    // Balance threads across months (take proportionally from each month)
+    let threadsToProcess = [];
+    const maxThreads = Math.min(threads.length, CONFIG.MAX_THREADS_PER_RUN);
+    const months = Object.keys(threadsByMonth).sort(); // Sort to ensure deterministic order
+    const threadsPerMonth = Math.ceil(maxThreads / months.length);
+    
+    for (const month of months) {
+      const monthThreads = threadsByMonth[month];
+      const threadsToTake = Math.min(threadsPerMonth, monthThreads.length);
+      threadsToProcess.push(...monthThreads.slice(0, threadsToTake));
+    }
+    
+    // If we still have room, fill with remaining threads from all months (round-robin)
+    if (threadsToProcess.length < maxThreads) {
+      const remainingThreads = [];
+      months.forEach(month => {
+        const monthThreads = threadsByMonth[month];
+        const alreadyTaken = threadsPerMonth;
+        remainingThreads.push(...monthThreads.slice(alreadyTaken));
+      });
+      
+      const additionalNeeded = maxThreads - threadsToProcess.length;
+      threadsToProcess.push(...remainingThreads.slice(0, additionalNeeded));
+    }
+    
+    if (threads.length > maxThreads) {
+      Log.info('Balanced threads for processing across months', {
         total: threads.length,
         processingThisRun: threadsToProcess.length,
         remainingForNextRun: threads.length - threadsToProcess.length,
         estimatedRuns: Math.ceil(threads.length / CONFIG.MAX_THREADS_PER_RUN),
-        note: 'Remaining threads will be processed in subsequent executions'
+        distribution: Object.keys(threadsByMonth).map(month => {
+          const monthThreadsInBatch = threadsToProcess.filter(t => {
+            const messages = t.getMessages();
+            if (messages.length === 0) return false;
+            const messageDate = new Date(messages[messages.length - 1].getDate());
+            const yearMonth = Utilities.formatDate(messageDate, Session.getScriptTimeZone(), 'yyyy-MM');
+            return yearMonth === month;
+          }).length;
+          return { month: month, processing: monthThreadsInBatch, total: threadsByMonth[month].length };
+        })
       });
     }
     
@@ -440,16 +493,38 @@ function processMessage(requestId, msgData) {
       return null;
     }
     
+    // Early duplicate check: Check if invoice already exists BEFORE expensive operations
+    // This check uses only what we know so far (subject, attachment filename if available)
+    // This is a fast pre-check to avoid calling Vertex AI for duplicates
+    const attachmentName = msgData.attachments && msgData.attachments.length > 0 ? msgData.attachments[0].name : '';
+    const subjectNormalized = (msgData.subject || '').toLowerCase();
+    
+    // Quick check: if subject contains invoice number pattern, check if it exists
+    // This is approximate but fast - will do full check after extraction
+    const quickCheck = false; // Disable for now - full check is still needed after extraction
+    
     // Get file URL first (needed for duplicate check)
     const fileUrl = file ? DriveManager.getFileUrl(file) : '';
     
     // Check if invoice already exists (by number, provider, or file URL)
+    // This is the definitive check after we have extracted data
     if (SheetsManager.invoiceExists(invoiceData.numeroFactura, invoiceData.proveedor, fileUrl)) {
-      Log.info('Invoice already exists in sheet', {
+      Log.info('Invoice already exists in sheet - skipping', {
         numeroFactura: invoiceData.numeroFactura,
         proveedor: invoiceData.proveedor,
         fileUrl: fileUrl
       });
+      
+      // Clean up file if we created it but it's a duplicate
+      if (file) {
+        try {
+          DriveApp.getFileById(file.getId()).setTrashed(true);
+          Log.info('Cleaned up duplicate PDF file', { fileId: file.getId() });
+        } catch (e) {
+          Log.warn('Could not clean up duplicate PDF file', { error: e.message });
+        }
+      }
+      
       return null;
     }
     
