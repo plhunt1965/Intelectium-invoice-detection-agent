@@ -19,10 +19,12 @@ Sistema automatizado de Google Apps Script para detectar, procesar y registrar f
 - ✅ Timeout explícito en llamadas a Vertex AI (30s)
 - ✅ Rate limiter corregido (sin cuelgues)
 - ✅ Mejora en extracción de IVA (formato simplificado)
+- ✅ Organización automática por mes usando fecha de factura (formato YYYY-MM)
 
 ### Cambios importantes en esta versión:
 - **Fix crítico**: Rate limiter corregido para evitar loops infinitos y cuelgues
 - **Mejora de extracción**: Prompt simplificado para mejor extracción de importes e IVA
+- **Organización por mes**: Las facturas se organizan en carpetas mensuales usando la fecha de la factura (no la del email)
 - **Validación previa**: Los emails sin adjuntos se validan ANTES de crear el PDF, evitando crear archivos innecesarios
 - **Limpieza automática**: PDFs rechazados por el AI se eliminan automáticamente
 - **Verificación temprana**: Rechazo de Ipronics antes de descargar PDFs (verifica nombre del archivo)
@@ -33,7 +35,7 @@ Sistema automatizado de Google Apps Script para detectar, procesar y registrar f
 ### Historial de versiones:
 - **v1.1** (2026-01-09): Versión inicial estable con optimizaciones
 - **v1.2** (2026-01-09): Fix crítico del rate limiter que causaba cuelgues
-- **v1.3** (2026-01-09): Mejora de extracción de importes e IVA con prompt simplificado
+- **v1.3** (2026-01-09): Mejora de extracción de importes e IVA con prompt simplificado + Organización por mes usando fecha de factura
 
 ## 📋 Características
 
