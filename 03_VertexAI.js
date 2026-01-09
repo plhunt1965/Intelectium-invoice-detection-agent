@@ -30,12 +30,39 @@ const VertexAI = {
      */
     waitIfNeeded: function() {
       while (!this.canCall()) {
-        const oldestCall = Math.min(...this._calls);
-        const waitTime = 60000 - (Date.now() - oldestCall) + 1000;
-        if (waitTime > 0) {
-          Log.debug('Rate limit reached, waiting', { waitTime: waitTime });
-          Utilities.sleep(Math.min(waitTime, 60000));
+        // Safety check: if array is empty, we should be able to call
+        if (this._calls.length === 0) {
+          Log.warn('Rate limiter: _calls is empty but canCall() returned false, breaking loop');
+          break;
         }
+        
+        const oldestCall = Math.min(...this._calls);
+        const now = Date.now();
+        const ageOfOldestCall = now - oldestCall;
+        
+        // Calculate how long to wait until the oldest call expires (leaves the 1-minute window)
+        // We need to wait until oldestCall is more than 60 seconds old
+        const waitTime = Math.max(0, 60000 - ageOfOldestCall + 1000); // +1000ms buffer
+        
+        if (waitTime > 0 && waitTime <= 61000) { // Sanity check: wait time should be reasonable
+          Log.debug('Rate limit reached, waiting', { 
+            waitTime: waitTime,
+            oldestCallAge: ageOfOldestCall,
+            callsInWindow: this._calls.length
+          });
+          Utilities.sleep(Math.min(waitTime, 61000)); // Cap at 61 seconds max
+        } else {
+          // Invalid wait time - something is wrong, break to avoid infinite loop
+          Log.warn('Rate limiter: Invalid wait time calculated, breaking loop', {
+            waitTime: waitTime,
+            oldestCall: oldestCall,
+            now: now,
+            ageOfOldestCall: ageOfOldestCall
+          });
+          break;
+        }
+        
+        // Re-check after sleep - canCall() will filter expired calls
         this.canCall();
       }
     }
