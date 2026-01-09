@@ -225,12 +225,10 @@ function processMessage(requestId, msgData) {
         return null;
       }
       
-      // Get month folder (use message date as fallback)
-      const invoiceDate = msgData.date || new Date();
-      const folder = DriveManager.getOrCreateMonthFolder(requestId, invoiceDate);
-      
-      // Save attachment (PDFs are always saved, they're already invoices)
-      file = DriveManager.saveAttachment(requestId, attachment, folder);
+      // Save attachment first (PDFs are always saved, they're already invoices)
+      // We'll move it to the correct folder after extracting invoice data
+      const tempFolder = DriveApp.getFolderById(CONFIG.DRIVE_ROOT_FOLDER_ID);
+      file = DriveManager.saveAttachment(requestId, attachment, tempFolder);
       
       // Try to extract PDF text, combine with email body
       const pdfText = VertexAI._extractTextFromPDF(requestId, file);
@@ -274,6 +272,24 @@ function processMessage(requestId, msgData) {
         return null;
       }
       
+      // Get month folder using invoice date (preferred) or message date (fallback)
+      const invoiceDate = _getInvoiceDate(invoiceData, msgData.date);
+      const folder = DriveManager.getOrCreateMonthFolder(requestId, invoiceDate);
+      
+      // Move file to correct month folder if it's not already there
+      if (file.getParents().hasNext()) {
+        const currentParent = file.getParents().next();
+        if (currentParent.getId() !== folder.getId()) {
+          folder.addFile(file);
+          currentParent.removeFile(file);
+          Log.info('Moved file to correct month folder', {
+            fileId: file.getId(),
+            fromFolder: currentParent.getName(),
+            toFolder: folder.getName()
+          });
+        }
+      }
+      
     } else {
       // IMPORTANT: For emails without attachments, validate first before creating PDF
       // This prevents creating PDFs from non-invoice emails (e.g., Iberdrola marketing)
@@ -312,7 +328,8 @@ function processMessage(requestId, msgData) {
           invoiceData.numeroFactura &&
           invoiceData.proveedor.trim() !== '' &&
           invoiceData.numeroFactura.trim() !== '') {
-        const invoiceDate = msgData.date || new Date();
+        // Get month folder using invoice date (preferred) or message date (fallback)
+        const invoiceDate = _getInvoiceDate(invoiceData, msgData.date);
         const folder = DriveManager.getOrCreateMonthFolder(requestId, invoiceDate);
         
         file = PDFGenerator.createFromEmailBody(
@@ -323,7 +340,8 @@ function processMessage(requestId, msgData) {
         );
         
         Log.info('PDF created from email body (validated as invoice)', {
-          fileId: file.getId()
+          fileId: file.getId(),
+          folder: folder.getName()
         });
       } else {
         Log.info('Email body is not a valid invoice, skipping PDF creation', {
@@ -392,6 +410,49 @@ function processMessage(requestId, msgData) {
     });
     throw error;
   }
+}
+
+/**
+ * Get invoice date from extracted data or fallback to message date
+ * @param {Object} invoiceData - Extracted invoice data
+ * @param {Date} messageDate - Email message date
+ * @returns {Date} Invoice date
+ * @private
+ */
+function _getInvoiceDate(invoiceData, messageDate) {
+  // Prefer invoice date from extracted data
+  if (invoiceData && invoiceData.fechaFactura) {
+    try {
+      // Parse date string (YYYY-MM-DD)
+      const dateParts = invoiceData.fechaFactura.split('-');
+      if (dateParts.length === 3) {
+        const invoiceDate = new Date(
+          parseInt(dateParts[0]), 
+          parseInt(dateParts[1]) - 1, 
+          parseInt(dateParts[2])
+        );
+        invoiceDate.setHours(12, 0, 0, 0); // Set to noon to avoid timezone issues
+        Log.debug('Using invoice date from extracted data', {
+          fechaFactura: invoiceData.fechaFactura,
+          parsedDate: Utilities.formatDate(invoiceDate, Session.getScriptTimeZone(), 'yyyy-MM-dd')
+        });
+        return invoiceDate;
+      }
+    } catch (error) {
+      Log.warn('Failed to parse invoice date, using message date', {
+        fechaFactura: invoiceData.fechaFactura,
+        error: error.message
+      });
+    }
+  }
+  
+  // Fallback to message date or current date
+  const fallbackDate = messageDate || new Date();
+  Log.debug('Using fallback date for folder', {
+    date: Utilities.formatDate(fallbackDate, Session.getScriptTimeZone(), 'yyyy-MM-dd'),
+    source: messageDate ? 'message date' : 'current date'
+  });
+  return fallbackDate;
 }
 
 /**
