@@ -145,11 +145,26 @@ const SheetsManager = {
     
     try {
       const sheet = this._getSheet();
-      const dataRange = sheet.getDataRange();
-      const values = dataRange.getValues();
+      const lastRow = sheet.getLastRow();
+      
+      // CACHED DEDUPLICATION: Only check last 200 rows for O(1) lookup performance
+      // Most duplicates will be recent, and checking all rows is O(n) and slow for large sheets
+      const rowsToCheck = 200;
+      const startRow = Math.max(1, lastRow - rowsToCheck + 1); // +1 to include header if we're at row 1
+      const numRows = Math.min(rowsToCheck, lastRow);
+      
+      if (numRows <= 0) {
+        return false; // Empty sheet
+      }
+      
+      // CACHED DEDUPLICATION: Fetch only Column C (Invoice Numbers) for fast O(1) check
+      // Convert to flat array for efficient includes() lookup
+      const invoiceNumbers = sheet.getRange(startRow, 3, numRows, 1).getValues(); // Column C
+      const invoiceNumbersFlat = invoiceNumbers.map(row => (row[0] || '').toString().trim()).filter(n => n);
       
       // Normalize provider name for comparison
       const normalizedProveedor = (proveedor || '').toLowerCase().trim();
+      const normalizedNumero = numeroFactura ? numeroFactura.toString().trim() : '';
       
       // Special case: Reject ALL Ipronics/Intelectium invoices (they should not be registered)
       if (CONFIG.EMPRESAS_EMISORAS.some(empresa => normalizedProveedor.includes(empresa))) {
@@ -159,50 +174,57 @@ const SheetsManager = {
         return true; // Return true to prevent registration
       }
       
-      // Skip header row
-      for (let i = 1; i < values.length; i++) {
-        const rowProveedor = (values[i][0] || '').toLowerCase().trim(); // Column A
-        const rowNumero = (values[i][2] || '').toString().trim(); // Column C
-        const rowFileUrl = values[i][7] || ''; // Column H (Link al archivo)
+      // CACHED DEDUPLICATION: Fast O(1) check by invoice number
+      if (normalizedNumero && invoiceNumbersFlat.includes(normalizedNumero)) {
+        Log.info('Duplicate invoice found by number (cached check)', {
+          numeroFactura: numeroFactura,
+          checkedRows: numRows,
+          totalRows: lastRow
+        });
+        return true;
+      }
+      
+      // If we need provider+number or fileUrl check, fetch those columns for the last 200 rows
+      if ((normalizedProveedor && normalizedNumero) || fileUrl) {
+        const providers = sheet.getRange(startRow, 1, numRows, 1).getValues(); // Column A
+        const fileUrls = sheet.getRange(startRow, 8, numRows, 1).getValues(); // Column H
         
-        // Check by invoice number (exact match)
-        if (numeroFactura && rowNumero && rowNumero === numeroFactura.toString().trim()) {
-          Log.info('Duplicate invoice found by number', {
-            numeroFactura: numeroFactura,
-            row: i + 1
-          });
-          return true;
-        }
-        
-        // Check by provider + invoice number
-        if (normalizedProveedor && numeroFactura && 
-            rowProveedor === normalizedProveedor && 
-            rowNumero === numeroFactura.toString().trim()) {
-          Log.info('Duplicate invoice found by provider + number', {
-            proveedor: proveedor,
-            numeroFactura: numeroFactura,
-            row: i + 1
-          });
-          return true;
-        }
-        
-        // Special check: If this is an Ipronics invoice, reject it even if number is different
-        if (CONFIG.EMPRESAS_EMISORAS.some(empresa => normalizedProveedor.includes(empresa) || rowProveedor.includes(empresa))) {
-          Log.info('Duplicate Ipronics invoice found (rejecting all Ipronics invoices)', {
-            proveedor: proveedor,
-            existingProveedor: values[i][0],
-            row: i + 1
-          });
-          return true;
-        }
-        
-        // Check by file URL if provided (for duplicate PDF detection)
-        if (fileUrl && rowFileUrl && rowFileUrl === fileUrl) {
-          Log.info('Duplicate invoice found by file URL', {
-            fileUrl: fileUrl,
-            row: i + 1
-          });
-          return true;
+        for (let i = 0; i < numRows; i++) {
+          const rowProveedor = (providers[i][0] || '').toLowerCase().trim();
+          const rowNumero = (invoiceNumbers[i][0] || '').toString().trim();
+          const rowFileUrl = fileUrls[i][0] || '';
+          
+          // Check by provider + invoice number
+          if (normalizedProveedor && normalizedNumero && 
+              rowProveedor === normalizedProveedor && 
+              rowNumero === normalizedNumero) {
+            Log.info('Duplicate invoice found by provider + number (cached check)', {
+              proveedor: proveedor,
+              numeroFactura: numeroFactura,
+              checkedRows: numRows,
+              totalRows: lastRow
+            });
+            return true;
+          }
+          
+          // Special check: If this is an Ipronics invoice, reject it even if number is different
+          if (CONFIG.EMPRESAS_EMISORAS.some(empresa => normalizedProveedor.includes(empresa) || rowProveedor.includes(empresa))) {
+            Log.info('Duplicate Ipronics invoice found (cached check)', {
+              proveedor: proveedor,
+              existingProveedor: providers[i][0],
+              checkedRows: numRows
+            });
+            return true;
+          }
+          
+          // Check by file URL if provided (for duplicate PDF detection)
+          if (fileUrl && rowFileUrl && rowFileUrl === fileUrl) {
+            Log.info('Duplicate invoice found by file URL (cached check)', {
+              fileUrl: fileUrl,
+              checkedRows: numRows
+            });
+            return true;
+          }
         }
       }
       

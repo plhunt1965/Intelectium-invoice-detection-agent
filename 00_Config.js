@@ -33,13 +33,14 @@ const CONFIG = {
     // Processing Configuration
     MAX_RETRIES: 3,
     RATE_LIMIT_CALLS_PER_MINUTE: 60,
-    BATCH_SIZE: 10,
+    BATCH_SIZE: 5, // Reduced for better granularity and time management
     MAX_THREADS_PER_RUN: 50, // Maximum threads to process per execution (prevents timeout)
-    MAX_EXECUTION_TIME_MS: 300000, // 5 minutes max execution time (safety limit)
+    MAX_EXECUTION_TIME_MS: 260000, // 260 seconds (4.33 min) - buffer before 6-minute GAS limit for graceful shutdown
     MAX_PDF_EXTRACTION_TIME_MS: 10000, // 10 seconds max for PDF text extraction
-    MAX_INVOICE_PROCESSING_TIME_MS: 30000, // 30 seconds max per invoice (reduced from 45s for faster failure)
-    MAX_VERTEX_AI_CALL_TIME_MS: 15000, // 15 seconds max for single Vertex AI call (reduced from 20s)
-    MAX_RATE_LIMITER_WAIT_MS: 5000, // 5 seconds max wait for rate limiter (reduced from 10s)
+    MAX_INVOICE_PROCESSING_TIME_MS: 25000, // 25 seconds max per invoice
+    MAX_VERTEX_AI_CALL_TIME_MS: 25000, // 25 seconds max for single Vertex AI call (allows longer responses)
+    MAX_RATE_LIMITER_WAIT_MS: 3000, // 3 seconds max wait for rate limiter
+    MAX_PDF_SIZE_FOR_EXTRACTION: 2 * 1024 * 1024, // 2MB - skip text extraction for larger PDFs
     
     // Email Search Date Configuration
     SEARCH_START_DATE: '2025-10-01', // Fecha de inicio (YYYY-MM-DD)
@@ -125,5 +126,5 @@ IMPORTANTE:
 - Si falta numeroFactura O todos los importes, la factura será rechazada
 - Convierte TODAS las comas a puntos en números
 - Agrega .00 a números sin decimales
-- Responde SOLO JSON, sin texto adicional`
+- CRÍTICO: Responde ÚNICAMENTE el objeto JSON válido, SIN markdown, SIN backticks, SIN código de bloque, SIN texto explicativo. Solo el JSON puro empezando con { y terminando con }`
   };

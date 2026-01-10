@@ -12,15 +12,25 @@ function processInvoiceEmails() {
   const requestId = Log.init();
   const startTime = Date.now();
   
+  // Circuit breaker pattern: stop processing after consecutive timeouts
+  let consecutiveTimeouts = 0;
+  const MAX_CONSECUTIVE_TIMEOUTS = 2;
+  
   Log.info('Starting invoice email processing', {
     timestamp: new Date().toISOString(),
     maxExecutionTime: CONFIG.MAX_EXECUTION_TIME_MS,
-    maxThreads: CONFIG.MAX_THREADS_PER_RUN
+    maxThreads: CONFIG.MAX_THREADS_PER_RUN,
+    maxConsecutiveTimeouts: MAX_CONSECUTIVE_TIMEOUTS
   });
+  
+  // Track if time limit was reached for auto-recovery trigger
+  let isTimeLimitReached = false;
+  let allThreads = [];
   
   try {
     // Search for invoice emails
     const threads = GmailManager.searchInvoiceEmails(requestId, true);
+    allThreads = threads; // Store for auto-recovery trigger
     
     if (threads.length === 0) {
       Log.info('No invoice emails found');
@@ -101,13 +111,18 @@ function processInvoiceEmails() {
     };
     
     for (let i = 0; i < threadsToProcess.length; i += CONFIG.BATCH_SIZE) {
-      // Check execution time before processing next batch
+      // FATAL ERROR FIX: Check execution time before processing next batch with buffer
       const elapsedTime = Date.now() - startTime;
+      const timeRemaining = CONFIG.MAX_EXECUTION_TIME_MS - elapsedTime;
+      
       if (elapsedTime > CONFIG.MAX_EXECUTION_TIME_MS) {
-        Log.warn('Maximum execution time reached, stopping processing', {
-          elapsedTime: elapsedTime,
-          maxTime: CONFIG.MAX_EXECUTION_TIME_MS,
+        isTimeLimitReached = true;
+        Log.warn('Graceful shutdown: Maximum execution time reached, stopping processing', {
+          elapsedTime: Math.round(elapsedTime / 1000) + 's',
+          maxTime: Math.round(CONFIG.MAX_EXECUTION_TIME_MS / 1000) + 's',
           processed: results.processed,
+          created: results.created,
+          skipped: results.skipped,
           remaining: threadsToProcess.length - i
         });
         break;
@@ -119,19 +134,34 @@ function processInvoiceEmails() {
         batch: Math.floor(i / CONFIG.BATCH_SIZE) + 1,
         totalBatches: Math.ceil(threadsToProcess.length / CONFIG.BATCH_SIZE),
         batchSize: batch.length,
-        elapsedTime: Math.round(elapsedTime / 1000) + 's'
+        elapsedTime: Math.round(elapsedTime / 1000) + 's',
+        timeRemaining: Math.round(timeRemaining / 1000) + 's'
       });
       
       for (const thread of batch) {
-        // Check execution time before processing each thread
+        // FATAL ERROR FIX: Check execution time before processing each thread
         const elapsedTime = Date.now() - startTime;
+        const timeRemaining = CONFIG.MAX_EXECUTION_TIME_MS - elapsedTime;
+        
         if (elapsedTime > CONFIG.MAX_EXECUTION_TIME_MS) {
-          Log.warn('Maximum execution time reached, stopping processing', {
-            elapsedTime: elapsedTime,
-            processed: results.processed
+          isTimeLimitReached = true;
+          Log.warn('Graceful shutdown: Maximum execution time reached, stopping processing', {
+            elapsedTime: Math.round(elapsedTime / 1000) + 's',
+            processed: results.processed,
+            created: results.created,
+            timeRemaining: Math.round(timeRemaining / 1000) + 's'
           });
           break;
         }
+        
+        // LOGGING & TELEMETRY: Log remaining GAS execution time
+        const remainingGASTime = (CONFIG.MAX_EXECUTION_TIME_MS - elapsedTime) / 1000;
+        Log.debug('Time remaining before GAS timeout', {
+          elapsedTime: Math.round(elapsedTime / 1000) + 's',
+          timeRemaining: Math.round(timeRemaining / 1000) + 's',
+          remainingGASExecutionTime: Math.round(remainingGASTime) + 's',
+          buffer: '40s before 6-minute limit'
+        });
         
         try {
           const threadResult = processThread(requestId, thread);
@@ -139,11 +169,48 @@ function processInvoiceEmails() {
           results.created += threadResult.created;
           results.skipped += threadResult.skipped;
           
+          // Reset consecutive timeout counter on successful processing
+          if (threadResult.processed > 0 || threadResult.created > 0) {
+            consecutiveTimeouts = 0;
+          }
+          
         } catch (error) {
           results.errors++;
+          
+          // Circuit breaker: check for timeout errors
+          const isTimeout = error.message && (
+            error.message.includes('timeout') || 
+            error.message.includes('Timeout') ||
+            error.message.includes('took too long')
+          );
+          
+          if (isTimeout) {
+            consecutiveTimeouts++;
+            Log.warn('Timeout detected, circuit breaker active', { 
+              consecutiveTimeouts: consecutiveTimeouts,
+              maxAllowed: MAX_CONSECUTIVE_TIMEOUTS,
+              threadId: thread.getId()
+            });
+            
+            if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+              Log.error('Too many consecutive Vertex AI timeouts, stopping execution to prevent waste', {
+                consecutiveTimeouts: consecutiveTimeouts,
+                processed: results.processed,
+                created: results.created,
+                skipped: results.skipped,
+                errors: results.errors
+              });
+              break; // Exit the processing loop
+            }
+          } else {
+            // Reset counter on non-timeout errors
+            consecutiveTimeouts = 0;
+          }
+          
           Log.error('Error processing thread', {
             error: error.message,
-            threadId: thread.getId()
+            threadId: thread.getId(),
+            isTimeout: isTimeout
           });
         }
       }
@@ -167,6 +234,108 @@ function processInvoiceEmails() {
       stack: error.stack
     });
     throw error;
+    
+  } finally {
+    // AUTO-RECOVERY TRIGGER: If time limit reached and there are remaining threads, schedule next run
+    if (isTimeLimitReached && allThreads.length > 0) {
+      try {
+        setupNextTrigger(requestId);
+      } catch (triggerError) {
+        Log.error('Failed to setup auto-recovery trigger', {
+          error: triggerError.message,
+          requestId: requestId
+        });
+      }
+    }
+  }
+}
+
+/**
+ * Setup auto-recovery trigger for next execution (if time limit reached)
+ * Deletes existing triggers first to avoid trigger-leaking
+ * @param {string} requestId - Request tracking ID
+ */
+function setupNextTrigger(requestId) {
+  // TRIGGER CLEANUP: Wrap all ScriptApp calls in try/catch to prevent crashes
+  // Even though we added the OAuth scope, permission issues can still occur
+  try {
+    // Delete existing triggers with same name to avoid trigger-leaking
+    let existingTriggers = [];
+    try {
+      existingTriggers = ScriptApp.getProjectTriggers().filter(trigger => 
+        trigger.getHandlerFunction() === 'processInvoiceEmails'
+      );
+    } catch (error) {
+      Log.warn('Failed to get existing triggers (permission issue?)', {
+        error: error.message,
+        requestId: requestId
+      });
+      // Continue anyway - try to create new trigger
+    }
+    
+    // Delete existing triggers
+    if (existingTriggers.length > 0) {
+      try {
+        existingTriggers.forEach(trigger => {
+          try {
+            ScriptApp.deleteTrigger(trigger);
+            Log.debug('Deleted existing trigger', {
+              triggerId: trigger.getUniqueId(),
+              handlerFunction: trigger.getHandlerFunction()
+            });
+          } catch (deleteError) {
+            Log.warn('Failed to delete existing trigger', {
+              error: deleteError.message,
+              triggerId: trigger.getUniqueId()
+            });
+            // Continue - try to delete others
+          }
+        });
+      } catch (error) {
+        Log.warn('Error during trigger cleanup', {
+          error: error.message,
+          requestId: requestId
+        });
+        // Continue - try to create new trigger anyway
+      }
+    }
+    
+    // Create one-time trigger to continue processing after 60 seconds
+    let newTrigger = null;
+    try {
+      newTrigger = ScriptApp.newTrigger('processInvoiceEmails')
+        .timeBased()
+        .after(60000) // 60 seconds delay
+        .create();
+      
+      Log.info('Auto-recovery trigger created successfully', {
+        requestId: requestId,
+        triggerId: newTrigger.getUniqueId(),
+        handlerFunction: 'processInvoiceEmails',
+        delay: '60 seconds',
+        reason: 'Time limit reached, continuing processing in next execution'
+      });
+    } catch (createError) {
+      Log.error('Failed to create auto-recovery trigger (permission issue?)', {
+        error: createError.message,
+        requestId: requestId,
+        suggestion: 'Check OAuth scope: https://www.googleapis.com/auth/script.scriptapp'
+      });
+      // Don't throw - allow execution to complete even if trigger creation fails
+      return false;
+    }
+    
+    return true;
+    
+  } catch (error) {
+    // Catch-all for any unexpected errors
+    Log.error('Unexpected error in setupNextTrigger', {
+      error: error.message,
+      stack: error.stack,
+      requestId: requestId
+    });
+    // Don't throw - allow execution to complete even if trigger setup fails
+    return false;
   }
 }
 
@@ -288,15 +457,9 @@ function processMessage(requestId, msgData) {
       }
     };
     
-    // Early rejection: Check for Ipronics/Intelectium in email subject/body before processing
-    const emailContentForCheck = (msgData.subject || '') + ' ' + (msgData.body || '');
-    const emailContentLower = emailContentForCheck.toLowerCase();
-    if (CONFIG.EMPRESAS_EMISORAS.some(empresa => emailContentLower.includes(empresa))) {
-      Log.info('Rejected early: Email mentions Intelectium/Ipronics (likely invoice issued by us)', {
-        subject: msgData.subject
-      });
-      return null;
-    }
+    // REJECTION LOGIC: Do NOT reject early based on email body/subject
+    // Only reject if AI identifies them as "proveedor" (issuer) in the extracted data
+    // This prevents false positives from signatures, email footers, or context mentions
     
     // Handle attachments or validate email body first
     if (msgData.hasAttachments && msgData.attachments.length > 0) {
@@ -358,48 +521,98 @@ function processMessage(requestId, msgData) {
       const tempFolder = DriveApp.getFolderById(CONFIG.DRIVE_ROOT_FOLDER_ID);
       file = DriveManager.saveAttachment(requestId, attachment, tempFolder);
       
-      // Try to extract PDF text, combine with email body
-      checkTimeout(); // Check timeout before expensive operation
-      const pdfText = VertexAI._extractTextFromPDF(requestId, file);
-      checkTimeout(); // Check timeout after expensive operation
+      // MULTIMODAL INJECTION: For PDFs < 1MB, skip text extraction and pass blob directly to Vertex AI
+      const pdfSize = file.getSize();
+      const useMultimodal = pdfSize < 1048576; // 1MB threshold
       
-      // Combine PDF text with email body
-      let combinedContent = '';
+      // VARIABLE SCOPE FIX: Do NOT redeclare invoiceData here - it's already declared at function scope (line 404)
+      // Remove "let" keyword to assign to parent scope variable
+      let fileBlob = null;
       
-      if (pdfText && pdfText.trim().length > 0) {
-        combinedContent += `CONTENIDO DEL PDF (LA FACTURA ESTÁ AQUÍ):\n${pdfText}\n\n`;
-        Log.info('Using extracted PDF text', { textLength: pdfText.length });
-      } else {
-        // Include PDF file reference if text extraction failed
-        combinedContent += `ARCHIVO PDF ADJUNTO: ${file.getName()}\n`;
-        combinedContent += `NOTA: El PDF está guardado pero no se pudo extraer el texto. Usa el contenido del email.\n\n`;
-      }
-      
-      // Include email body as context (but PDF has priority)
-      if (msgData.body && msgData.body.trim().length > 0) {
-        combinedContent += `CONTENIDO DEL EMAIL (contexto adicional):\n${msgData.body}\n\n`;
-      }
-      if (msgData.subject) {
-        combinedContent += `ASUNTO DEL EMAIL: ${msgData.subject}\n\n`;
-      }
-      
-      // Use combined content
-      checkTimeout(); // Check timeout before expensive operation
-      Log.info('Extracting invoice data from PDF + email body', { fileId: file.getId() });
-      invoiceData = VertexAI.extractInvoiceData(requestId, combinedContent, CONFIG.MAX_RETRIES);
-      checkTimeout(); // Check timeout after expensive operation
-      
-      // Validate after extraction - if rejected, clean up the downloaded file
-      if (!invoiceData || invoiceData.esFactura === false) {
-        Log.info('Invoice rejected after extraction, cleaning up downloaded file', {
+      if (useMultimodal) {
+        // Small PDF: Use multimodal injection (send PDF blob directly to Vertex AI)
+        Log.info('PDF < 1MB, using multimodal injection (skipping text extraction)', {
           fileId: file.getId(),
-          invoiceData: invoiceData
+          fileName: file.getName(),
+          fileSize: Math.round(pdfSize / 1024) + 'KB',
+          threshold: '1MB'
         });
-        try {
-          DriveApp.getFileById(file.getId()).setTrashed(true);
-          Log.info('Cleaned up rejected invoice file', { fileId: file.getId() });
-        } catch (e) {
-          Log.warn('Could not clean up rejected file', { error: e.message });
+        
+        checkTimeout();
+        fileBlob = file.getBlob();
+        
+        // Prepare minimal content (email body as context)
+        let combinedContent = '';
+        if (msgData.body && msgData.body.trim().length > 0) {
+          combinedContent += `CONTENIDO DEL EMAIL (contexto adicional):\n${msgData.body}\n\n`;
+        }
+        if (msgData.subject) {
+          combinedContent += `ASUNTO DEL EMAIL: ${msgData.subject}\n\n`;
+        }
+        
+        checkTimeout();
+        Log.info('Extracting invoice data using multimodal (PDF blob + email context)', {
+          fileId: file.getId(),
+          blobSize: fileBlob.getBytes().length
+        });
+        // Assign to parent scope invoiceData (no let keyword)
+        invoiceData = VertexAI.extractInvoiceData(requestId, combinedContent, CONFIG.MAX_RETRIES, fileBlob);
+        checkTimeout();
+        
+      } else {
+        // Large PDF: Extract text (existing flow)
+        Log.info('PDF >= 1MB, using text extraction method', {
+          fileId: file.getId(),
+          fileSize: Math.round(pdfSize / 1024 / 1024 * 100) / 100 + 'MB',
+          threshold: '1MB'
+        });
+        
+        checkTimeout();
+        const pdfText = VertexAI._extractTextFromPDF(requestId, file);
+        checkTimeout();
+        
+        // Combine PDF text with email body
+        let combinedContent = '';
+        
+        if (pdfText && pdfText.trim().length > 0) {
+          combinedContent += `CONTENIDO DEL PDF (LA FACTURA ESTÁ AQUÍ):\n${pdfText}\n\n`;
+          Log.info('Using extracted PDF text', { textLength: pdfText.length });
+        } else {
+          // Include PDF file reference if text extraction failed
+          combinedContent += `ARCHIVO PDF ADJUNTO: ${file.getName()}\n`;
+          combinedContent += `NOTA: El PDF está guardado pero no se pudo extraer el texto. Usa el contenido del email.\n\n`;
+        }
+        
+        // Include email body as context (but PDF has priority)
+        if (msgData.body && msgData.body.trim().length > 0) {
+          combinedContent += `CONTENIDO DEL EMAIL (contexto adicional):\n${msgData.body}\n\n`;
+        }
+        if (msgData.subject) {
+          combinedContent += `ASUNTO DEL EMAIL: ${msgData.subject}\n\n`;
+        }
+        
+        checkTimeout();
+        Log.info('Extracting invoice data from PDF text + email body', { fileId: file.getId() });
+        // Assign to parent scope invoiceData (no let keyword)
+        invoiceData = VertexAI.extractInvoiceData(requestId, combinedContent, CONFIG.MAX_RETRIES);
+        checkTimeout();
+      }
+      
+      // VALIDATION LOGIC FIX: extractInvoiceData already calls _isValidInvoice internally
+      // If it returns null, validation failed. If it returns an object, invoice is valid.
+      // No need for additional validation checks here - they would conflict with _isValidInvoice logic
+      if (!invoiceData) {
+        Log.warn('Invoice extraction returned null (rejected by _isValidInvoice in extractInvoiceData)', {
+          fileId: file ? file.getId() : 'N/A',
+          note: 'Check VertexAI logs for detailed rejection reason'
+        });
+        if (file) {
+          try {
+            DriveApp.getFileById(file.getId()).setTrashed(true);
+            Log.info('Cleaned up rejected invoice file', { fileId: file.getId() });
+          } catch (e) {
+            Log.warn('Could not clean up rejected file', { error: e.message });
+          }
         }
         return null;
       }
@@ -436,13 +649,9 @@ function processMessage(requestId, msgData) {
       const emailContent = msgData.body || msgData.htmlBody || msgData.subject || '';
       const emailContentLower = emailContent.toLowerCase();
       
-      // Early rejection: Check for Ipronics/Intelectium in email content
-      if (CONFIG.EMPRESAS_EMISORAS.some(empresa => emailContentLower.includes(empresa))) {
-        Log.info('Rejected early: Email mentions Intelectium/Ipronics (likely invoice issued by us)', {
-          subject: msgData.subject
-        });
-        return null;
-      }
+      // REJECTION LOGIC: Do NOT reject early based on email body/subject keywords
+      // Only reject if AI identifies them as "proveedor" (issuer) in the extracted data
+      // This prevents false positives from signatures, email footers, or context mentions
       
       // Quick rejection patterns for obvious non-invoices (BEFORE calling Vertex AI)
       const nonInvoicePatterns = [
@@ -525,33 +734,26 @@ function processMessage(requestId, msgData) {
       }
     }
     
-    // Validate extracted data (same logic as working version)
-    // Note: _isValidInvoice already validates this, but we double-check here
-    if (!invoiceData || (!invoiceData.proveedor && !invoiceData.numeroFactura)) {
-      Log.warn('Insufficient invoice data extracted', {
-        invoiceData: invoiceData
+    // VALIDATION LOGIC FIX: extractInvoiceData already calls _isValidInvoice internally
+    // If it returns a non-null object, the invoice is already validated
+    // We only need to check if it's null (which means validation failed)
+    // DO NOT add duplicate validation logic here - it will conflict with _isValidInvoice
+    if (!invoiceData) {
+      Log.warn('Invoice extraction returned null (rejected by _isValidInvoice)', {
+        invoiceData: invoiceData,
+        note: 'Check VertexAI logs for rejection reason'
       });
-      // If we created a file but it's not valid, we should clean it up
+      // If we created a file but validation failed, clean it up
       if (file) {
         try {
           DriveApp.getFileById(file.getId()).setTrashed(true);
-          Log.info('Cleaned up invalid PDF file', { fileId: file.getId() });
+          Log.info('Cleaned up rejected PDF file', { fileId: file.getId() });
         } catch (e) {
-          Log.warn('Could not clean up invalid PDF file', { error: e.message });
+          Log.warn('Could not clean up rejected PDF file', { error: e.message });
         }
       }
       return null;
     }
-    
-    // Early duplicate check: Check if invoice already exists BEFORE expensive operations
-    // This check uses only what we know so far (subject, attachment filename if available)
-    // This is a fast pre-check to avoid calling Vertex AI for duplicates
-    const attachmentName = msgData.attachments && msgData.attachments.length > 0 ? msgData.attachments[0].name : '';
-    const subjectNormalized = (msgData.subject || '').toLowerCase();
-    
-    // Quick check: if subject contains invoice number pattern, check if it exists
-    // This is approximate but fast - will do full check after extraction
-    const quickCheck = false; // Disable for now - full check is still needed after extraction
     
     // Get file URL first (needed for duplicate check)
     const fileUrl = file ? DriveManager.getFileUrl(file) : '';
@@ -585,6 +787,9 @@ function processMessage(requestId, msgData) {
     
     // Register in spreadsheet
     SheetsManager.registerInvoice(requestId, invoiceData, fileUrl);
+    
+    // RELIABILITY: Mark as processed IMMEDIATELY after successful registration to prevent duplicates
+    Storage.markEmailProcessed(msgData.messageId);
     
     Log.info('Message processed successfully', {
       messageId: msgData.messageId,

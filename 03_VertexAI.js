@@ -89,13 +89,14 @@ const VertexAI = {
   },
   
   /**
-   * Extract invoice data from content using Vertex AI
+   * Extract invoice data from content using Vertex AI with multimodal support
    * @param {string} requestId - Request tracking ID
    * @param {string} content - Text content (email body + file reference)
    * @param {number} maxRetries - Maximum retry attempts
+   * @param {Blob} fileBlob - Optional PDF blob for multimodal injection (skip text extraction)
    * @returns {Object} Extracted invoice data
    */
-  extractInvoiceData: function(requestId, content, maxRetries) {
+  extractInvoiceData: function(requestId, content, maxRetries, fileBlob) {
     maxRetries = maxRetries || CONFIG.MAX_RETRIES;
     
     const startTime = Date.now();
@@ -127,22 +128,39 @@ const VertexAI = {
         
         this._rateLimiter.recordCall();
         
-        // Extract from text content (email body + file reference)
-        // Limit to 30000 chars to prevent Vertex AI from taking too long with huge documents
-        const textContent = content.substring(0, 30000);
-        const prompt = CONFIG.INVOICE_EXTRACTION_PROMPT.replace('{content}', textContent);
+        // MULTIMODAL INJECTION: Use fileBlob if provided (skip text extraction for small PDFs)
+        // If fileBlob is provided, use multimodal mode (PDF sent directly to Vertex AI)
+        // Otherwise, use text content (limited to prevent timeouts)
+        let prompt;
         
-        if (content.length > 30000) {
-          Log.warn('Content truncated for Vertex AI', {
-            originalLength: content.length,
-            truncatedLength: textContent.length
+        if (fileBlob) {
+          // Multimodal mode: send PDF blob directly, use minimal prompt
+          prompt = CONFIG.INVOICE_EXTRACTION_PROMPT.replace('{content}', 'PDF adjunto - extrae los datos directamente del PDF.');
+          Log.debug('Using multimodal mode with PDF blob', {
+            blobSize: fileBlob.getBytes().length,
+            blobSizeMB: (fileBlob.getBytes().length / 1024 / 1024).toFixed(2)
           });
+        } else {
+          // Text mode: Limit to 2000 chars to prevent Vertex AI timeouts
+          const MAX_CONTENT_LENGTH = 2000;
+          let textContent = content || '';
+          
+          if (content && content.length > MAX_CONTENT_LENGTH) {
+            Log.warn('Content too long, truncating to prevent timeout', {
+              originalLength: content.length,
+              truncatedLength: MAX_CONTENT_LENGTH
+            });
+            textContent = content.substring(0, MAX_CONTENT_LENGTH);
+          }
+          
+          prompt = CONFIG.INVOICE_EXTRACTION_PROMPT.replace('{content}', textContent);
         }
         
         const callStartTime = Date.now();
         Log.debug('Calling Vertex AI API', { 
           attempt: attempt, 
           promptLength: prompt.length,
+          hasFileBlob: !!fileBlob,
           elapsed: callStartTime - startTime + 'ms',
           maxCallTime: maxSingleCallTime + 'ms',
           remainingTime: (maxTotalTime - (callStartTime - startTime)) + 'ms'
@@ -151,8 +169,8 @@ const VertexAI = {
         // Check timeout before making the call
         checkTimeout();
         
-        // Add timeout check during the call - if it takes too long, abort
-        const response = this._callAPI(requestId, prompt);
+        // Call API with optional fileBlob for multimodal
+        const response = this._callAPI(requestId, prompt, fileBlob);
         const callElapsed = Date.now() - callStartTime;
         
         // Double check - if the call took longer than expected, throw error immediately
@@ -214,8 +232,13 @@ const VertexAI = {
       } catch (error) {
         const elapsed = Date.now() - startTime;
         
-        // If timeout, don't retry
-        if (error.message && error.message.includes('timeout')) {
+        // EXPONENTIAL BACKOFF: Handle different error types
+        const isTimeout = error.message && error.message.includes('timeout');
+        const isRetriableError = error.type === 'RETRIABLE_ERROR' || error.type === 'FAILED_TEMPORARY';
+        const isRetriableHttpCode = error.code && (error.code === 429 || error.code === 500 || error.code === 503);
+        
+        // If timeout or non-retriable error, don't retry
+        if (isTimeout && !isRetriableError) {
           Log.error('Vertex AI extraction timeout, aborting', {
             attempt: attempt,
             elapsed: elapsed + 'ms',
@@ -224,32 +247,48 @@ const VertexAI = {
           throw error;
         }
         
-        Log.warn('Vertex AI extraction attempt failed', {
-          attempt: attempt,
-          maxRetries: maxRetries,
-          error: error.message,
-          elapsed: elapsed + 'ms'
-        });
+        // If not retriable and not last attempt, continue to next attempt
+        if (!isRetriableError && !isRetriableHttpCode && attempt < maxRetries) {
+          Log.warn('Vertex AI extraction attempt failed (non-retriable)', {
+            attempt: attempt,
+            maxRetries: maxRetries,
+            error: error.message || error.type,
+            elapsed: elapsed + 'ms'
+          });
+          // Continue to next attempt without backoff
+          continue;
+        }
         
-        if (attempt === maxRetries) {
+        // Last attempt or retriable error - check if we should retry
+        if (attempt >= maxRetries) {
           Log.error('Vertex AI extraction failed after retries', {
-            error: error.message,
+            error: error.message || error.type || 'Unknown error',
+            errorCode: error.code,
             totalTime: elapsed + 'ms',
             stack: error.stack
           });
           throw error;
         }
         
-        // Check timeout before backoff
+        // EXPONENTIAL BACKOFF: Jittered exponential backoff for retriable errors
         checkTimeout();
         
-        // Reduced backoff time to fail faster (max 3 seconds between retries)
-        const backoffTime = Math.min(Math.pow(2, attempt) * 500, 3000); // Reduced: 500ms, 1000ms, 2000ms max
-        Log.debug('Waiting before retry', { 
-          backoffTime: backoffTime + 'ms',
+        // Calculate jittered exponential backoff: base * 2^attempt + random jitter
+        const baseBackoff = Math.pow(2, attempt) * 1000; // Base: 2s, 4s, 8s
+        const jitter = Math.random() * 1000; // Random jitter 0-1000ms
+        const backoffTime = Math.min(baseBackoff + jitter, 10000); // Cap at 10s
+        
+        Log.warn('Vertex AI extraction attempt failed, retrying with backoff', {
           attempt: attempt,
-          elapsed: Date.now() - startTime + 'ms'
+          maxRetries: maxRetries,
+          error: error.message || error.type,
+          errorCode: error.code,
+          elapsed: elapsed + 'ms',
+          backoffTime: Math.round(backoffTime) + 'ms',
+          jitter: Math.round(jitter) + 'ms',
+          nextAttempt: attempt + 1
         });
+        
         Utilities.sleep(backoffTime);
         checkTimeout();
       }
@@ -271,11 +310,24 @@ const VertexAI = {
     
     try {
       const fileId = file.getId();
+      const pdfFile = DriveApp.getFileById(fileId);
+      const fileSize = pdfFile.getSize();
+      
+      // PDF HANDLING: Skip text extraction for large PDFs (>2MB) to save time
+      // Rely on email body + filename instead
+      if (fileSize > CONFIG.MAX_PDF_SIZE_FOR_EXTRACTION) {
+        Log.info('PDF too large for text extraction, skipping', {
+          fileId: fileId,
+          fileName: pdfFile.getName(),
+          fileSize: Math.round(fileSize / 1024 / 1024) + 'MB',
+          maxSize: Math.round(CONFIG.MAX_PDF_SIZE_FOR_EXTRACTION / 1024 / 1024) + 'MB',
+          note: 'Will use email body and filename instead'
+        });
+        return ''; // Return empty - will use email body + filename
+      }
       
       // Method: Convert PDF to Google Docs temporarily to extract text
       try {
-        // Get the file
-        const pdfFile = DriveApp.getFileById(fileId);
         
         // Create a temporary Google Doc from the PDF
         // Use Drive API v3 to copy and convert
@@ -450,16 +502,40 @@ const VertexAI = {
   },
   
   /**
-   * Call Vertex AI API - URL corregida según documentación oficial
+   * Call Vertex AI API with support for multimodal (PDF blob) input
+   * @param {string} requestId - Request tracking ID
+   * @param {string} prompt - Text prompt
+   * @param {Blob} fileBlob - Optional PDF blob for multimodal injection
+   * @returns {Object} Parsed API response
    */
-  _callAPI: function(requestId, prompt) {
+  _callAPI: function(requestId, prompt, fileBlob) {
     // URL correcta para Gemini 3 con locations/global
     const endpoint = `https://aiplatform.googleapis.com/v1/projects/${CONFIG.VERTEX_AI_PROJECT_ID}/locations/global/publishers/google/models/${CONFIG.VERTEX_AI_MODEL}:generateContent`;
+    
+    // MULTIMODAL INJECTION: Build payload with or without PDF blob
+    const parts = [{ text: prompt }];
+    
+    if (fileBlob) {
+      // Add PDF blob as inline_data for multimodal processing
+      const base64Data = Utilities.base64Encode(fileBlob.getBytes());
+      parts.push({
+        inline_data: {
+          mime_type: "application/pdf",
+          data: base64Data
+        }
+      });
+      
+      Log.debug('Multimodal payload: PDF blob included', {
+        requestId: requestId,
+        blobSize: fileBlob.getBytes().length,
+        base64Length: base64Data.length
+      });
+    }
     
     const payload = {
       contents: [{
         role: "user",
-        parts: [{ text: prompt }]
+        parts: parts
       }],
       generationConfig: {
         temperature: 0.1
@@ -474,10 +550,14 @@ const VertexAI = {
       },
       payload: JSON.stringify(payload),
       muteHttpExceptions: true,
-      timeout: 18000 // 18 seconds timeout (UrlFetchApp max is 30s, but we want to fail much earlier to prevent hanging)
+      timeout: 25 // CRITICAL: Timeout in SECONDS. Set to 25s to match MAX_VERTEX_AI_CALL_TIME_MS
     };
     
-    Log.debug('Calling Vertex AI', { endpoint: endpoint });
+    Log.debug('Calling Vertex AI', { 
+      endpoint: endpoint,
+      hasMultimodal: !!fileBlob,
+      payloadSize: JSON.stringify(payload).length
+    });
     
     const startTime = Date.now();
     let response;
@@ -485,6 +565,21 @@ const VertexAI = {
       response = UrlFetchApp.fetch(endpoint, options);
     } catch (error) {
       const elapsed = Date.now() - startTime;
+      
+      // EXPONENTIAL BACKOFF: Handle Socket Timeout errors
+      if (error.message && error.message.includes('Socket Timeout')) {
+        Log.warn('Socket Timeout error - temporary failure', {
+          requestId: requestId,
+          error: error.message,
+          elapsed: elapsed
+        });
+        throw { 
+          type: 'FAILED_TEMPORARY', 
+          message: `Socket Timeout after ${elapsed}ms`,
+          originalError: error 
+        };
+      }
+      
       Log.error('Vertex AI fetch failed', {
         error: error.message,
         elapsed: elapsed
@@ -496,6 +591,22 @@ const VertexAI = {
     Log.debug('Vertex AI response received', { elapsed: elapsed });
     
     const responseCode = response.getResponseCode();
+    
+    // EXPONENTIAL BACKOFF: Handle retriable HTTP errors
+    if (responseCode === 429 || responseCode === 500 || responseCode === 503) {
+      const errorText = response.getContentText();
+      Log.warn('Retriable HTTP error from Vertex AI', {
+        code: responseCode,
+        requestId: requestId,
+        respuesta_servidor: errorText.substring(0, 500)
+      });
+      throw { 
+        type: 'RETRIABLE_ERROR', 
+        code: responseCode,
+        message: `Vertex AI API error: ${responseCode}`,
+        responseText: errorText
+      };
+    }
     
     if (responseCode !== 200) {
       const errorText = response.getContentText();
@@ -515,31 +626,48 @@ const VertexAI = {
    */
   _parseResponse: function(requestId, response) {
     try {
-      const text = response.candidates[0].content.parts[0].text;
+      const text = response.candidates[0].content.parts[0].text.trim();
       
-      // Log raw response for debugging
+      // VERTEX AI OPTIMIZATION: Handle potential long responses better
+      // Log raw response (truncated for large responses)
+      const logLength = Math.min(text.length, 1000);
       Log.debug('Vertex AI raw response', {
         requestId: requestId,
         responseLength: text.length,
-        firstChars: text.substring(0, 500),
-        lastChars: text.length > 500 ? text.substring(text.length - 500) : ''
+        firstChars: text.substring(0, logLength),
+        truncated: text.length > logLength
       });
       
-      // Intentar encontrar un bloque de código JSON o el objeto directamente
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        
-        // Log parsed data for debugging
-        Log.debug('Vertex AI parsed response', {
+      // Try direct JSON parse first (prompt now returns ONLY JSON without markdown)
+      try {
+        const parsed = JSON.parse(text);
+        Log.debug('Vertex AI parsed response (direct JSON)', {
           requestId: requestId,
           parsed: parsed
         });
-        
         return parsed;
+      } catch (directParseError) {
+        // If direct parse fails, try to find JSON object in response
+        // Remove markdown code blocks if present (backwards compatibility)
+        let cleanText = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+        
+        // Find JSON object (first { to last })
+        const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          try {
+            const parsed = JSON.parse(jsonMatch[0]);
+            Log.debug('Vertex AI parsed response (extracted JSON)', {
+              requestId: requestId,
+              parsed: parsed
+            });
+            return parsed;
+          } catch (extractParseError) {
+            throw new Error('JSON encontrado pero no válido: ' + extractParseError.message);
+          }
+        }
+        
+        throw new Error('No se encontró un JSON válido en la respuesta. Direct parse error: ' + directParseError.message);
       }
-      
-      throw new Error('No se encontró un JSON válido en la respuesta del modelo');
       
     } catch (error) {
       Log.error('Error al parsear respuesta de Vertex AI', {
