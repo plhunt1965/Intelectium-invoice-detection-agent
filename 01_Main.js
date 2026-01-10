@@ -300,20 +300,57 @@ function processMessage(requestId, msgData) {
     
     // Handle attachments or validate email body first
     if (msgData.hasAttachments && msgData.attachments.length > 0) {
-      // Process first PDF attachment (or first attachment if no PDF)
-      const attachment = msgData.attachments.find(a => 
-        a.getContentType() === 'application/pdf' || 
-        a.getName().toLowerCase().endsWith('.pdf')
-      ) || msgData.attachments[0];
+      // Filter for PDF attachments only
+      const pdfAttachments = msgData.attachments.filter(att => {
+        const contentType = att.getContentType();
+        const name = att.getName().toLowerCase();
+        return contentType === 'application/pdf' || name.endsWith('.pdf');
+      });
+      
+      if (pdfAttachments.length === 0) {
+        // Has attachments but no PDFs - skip (not an invoice)
+        Log.info('Has attachments but no PDFs, skipping', {
+          attachments: msgData.attachments.map(a => a.getName()),
+          subject: msgData.subject
+        });
+        return null;
+      }
+      
+      // Prioritize PDFs - use first PDF attachment
+      const attachment = pdfAttachments[0];
+      Log.info('Found PDF attachment(s), using first PDF', {
+        count: pdfAttachments.length,
+        filename: attachment.getName(),
+        totalAttachments: msgData.attachments.length
+      });
       
       // Check attachment filename for Ipronics/Intelectium BEFORE downloading
       const attachmentName = (attachment.getName() || '').toLowerCase();
-      if (empresasEmisoras.some(empresa => attachmentName.includes(empresa))) {
+      if (CONFIG.EMPRESAS_EMISORAS.some(empresa => attachmentName.includes(empresa))) {
         Log.info('Rejected: Attachment filename mentions Intelectium/Ipronics', {
           filename: attachment.getName(),
           subject: msgData.subject
         });
         return null;
+      }
+      
+      // Early duplicate check for attachments based on filename pattern
+      // Extract potential invoice number from filename (e.g., "Invoice-12345.pdf" or "FRA_L_1629.pdf")
+      const filename = attachment.getName();
+      const filenameMatch = filename.match(/[A-Z0-9]+[-_][0-9]+|[A-Z]+[_-]?[0-9]{4,}|[0-9]{5,}/i);
+      if (filenameMatch) {
+        const potentialInvoiceNum = filenameMatch[0].replace(/[-_]/g, '').replace(/^[A-Z]+/i, '');
+        if (potentialInvoiceNum && potentialInvoiceNum.length >= 3) {
+          // Quick check if similar invoice exists (using only invoice number, provider will be null)
+          if (SheetsManager.invoiceExists(potentialInvoiceNum, null, null)) {
+            Log.info('Skipping: Potential duplicate detected from filename', {
+              filename: filename,
+              invoiceNumber: potentialInvoiceNum,
+              subject: msgData.subject
+            });
+            return null;
+          }
+        }
       }
       
       // Save attachment first (PDFs are always saved, they're already invoices)
@@ -403,6 +440,33 @@ function processMessage(requestId, msgData) {
       if (CONFIG.EMPRESAS_EMISORAS.some(empresa => emailContentLower.includes(empresa))) {
         Log.info('Rejected early: Email mentions Intelectium/Ipronics (likely invoice issued by us)', {
           subject: msgData.subject
+        });
+        return null;
+      }
+      
+      // Quick rejection patterns for obvious non-invoices (BEFORE calling Vertex AI)
+      const nonInvoicePatterns = [
+        /entregado.*productos/i,
+        /pedido.*enviado/i,
+        /suscripción.*camino/i,
+        /último correo/i,
+        /your.*order.*shipped/i,
+        /tracking.*number/i,
+        /envío realizado/i,
+        /tu pedido.*se ha/i,
+        /n\.º de pedido/i,
+        /número de pedido/i,
+        /order.*number/i
+      ];
+      
+      const subjectLower = (msgData.subject || '').toLowerCase();
+      const bodyPreview = emailContent.substring(0, 500).toLowerCase();
+      
+      if (nonInvoicePatterns.some(pattern => 
+          pattern.test(subjectLower) || pattern.test(bodyPreview))) {
+        Log.info('Rejected early: Email matches non-invoice pattern (shipping/order confirmation)', {
+          subject: msgData.subject,
+          matchedPattern: nonInvoicePatterns.find(p => p.test(subjectLower) || p.test(bodyPreview)).toString()
         });
         return null;
       }
