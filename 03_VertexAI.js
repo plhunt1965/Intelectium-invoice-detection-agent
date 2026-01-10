@@ -1,7 +1,7 @@
 /**
  * Vertex AI Module
  * Handles invoice data extraction using Vertex AI Gemini 3
- * Updated: 2026-01-09 - Aggressive timeouts: 45s per invoice, 18s per Vertex AI call, 30k char limit
+ * Updated: 2026-01-09 - v1.6: Prompt mejorado con ejemplo Carles, balanceo por mes, validación estricta, logging mejorado
  */
 
 const VertexAI = {
@@ -382,17 +382,9 @@ const VertexAI = {
     // Check if it's an invoice issued BY Intelectium (should be rejected)
     const proveedor = (invoiceData.proveedor || '').toLowerCase();
     const concepto = (invoiceData.concepto || '').toLowerCase();
-    const empresasEmisoras = [
-      'intelectium', 
-      'ipronics', 
-      'ipronics program', 
-      'ipronics programmable',
-      'ipronics programmable photonics',
-      'ipronics programmable s.l.'
-    ];
     
     // Check in provider name
-    if (empresasEmisoras.some(empresa => proveedor.includes(empresa))) {
+    if (CONFIG.EMPRESAS_EMISORAS.some(empresa => proveedor.includes(empresa))) {
       Log.info('Rejected: Invoice issued by Intelectium/Ipronics, not received', {
         proveedor: invoiceData.proveedor
       });
@@ -400,7 +392,7 @@ const VertexAI = {
     }
     
     // Also check in concept (sometimes the provider name is in the concept)
-    if (empresasEmisoras.some(empresa => concepto.includes(empresa))) {
+    if (CONFIG.EMPRESAS_EMISORAS.some(empresa => concepto.includes(empresa))) {
       Log.info('Rejected: Invoice issued by Intelectium/Ipronics (found in concept), not received', {
         proveedor: invoiceData.proveedor,
         concepto: invoiceData.concepto
@@ -414,28 +406,30 @@ const VertexAI = {
       return false;
     }
     
-    // Invoice number is CRITICAL - reject if missing
-    if (!invoiceData.numeroFactura || invoiceData.numeroFactura.trim() === '') {
-      Log.warn('Invoice number is missing or empty - REJECTING', { 
-        proveedor: invoiceData.proveedor 
-      });
-      return false;
-    }
-    
-    // At least one amount field must be present (importeSinIVA, iva, or importeTotal)
+    // Must have either invoice number OR total amount (for receipts without formal invoice numbers)
+    // Many receipts (Stripe, AWS, etc.) don't have invoice numbers but have amounts
+    const hasInvoiceNumber = invoiceData.numeroFactura && invoiceData.numeroFactura.trim() !== '';
     const hasAnyAmount = (invoiceData.importeSinIVA !== null && invoiceData.importeSinIVA !== undefined && invoiceData.importeSinIVA !== 0) ||
                          (invoiceData.iva !== null && invoiceData.iva !== undefined && invoiceData.iva !== 0) ||
                          (invoiceData.importeTotal !== null && invoiceData.importeTotal !== undefined && invoiceData.importeTotal !== 0);
     
-    if (!hasAnyAmount) {
-      Log.warn('Missing all amount fields (importeSinIVA, iva, importeTotal) - REJECTING', {
+    if (!hasInvoiceNumber && !hasAnyAmount) {
+      Log.warn('Missing both invoice number and all amount fields - REJECTING', {
         proveedor: invoiceData.proveedor,
-        numeroFactura: invoiceData.numeroFactura,
+        numeroFactura: invoiceData.numeroFactura || 'missing',
         importeSinIVA: invoiceData.importeSinIVA,
         iva: invoiceData.iva,
         importeTotal: invoiceData.importeTotal
       });
       return false;
+    }
+    
+    // If missing invoice number but has amount, log warning but allow (for receipts)
+    if (!hasInvoiceNumber && hasAnyAmount) {
+      Log.info('Invoice number missing but has amount - allowing (receipt type)', {
+        proveedor: invoiceData.proveedor,
+        importeTotal: invoiceData.importeTotal
+      });
     }
     
     // Check for common false positive patterns
@@ -558,3 +552,4 @@ const VertexAI = {
       throw new Error('Error al parsear respuesta de Vertex AI: ' + error.message);
     }
   }
+};

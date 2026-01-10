@@ -1,4 +1,5 @@
 
+// v1.6 - 2026-01-09: Prompt mejorado, balanceo por mes, validación estricta
 const CONFIG = {
     // Vertex AI Configuration
     VERTEX_AI_PROJECT_ID: 'invoice-detection-agent',
@@ -17,6 +18,16 @@ const CONFIG = {
     EMAIL_ACCOUNTS: [
       'patricio.hunt@gmail.com',
       'patricio.hunt@intelectium.com'
+    ],
+    
+    // Companies that issue invoices (should be rejected, not received)
+    EMPRESAS_EMISORAS: [
+      'intelectium',
+      'ipronics',
+      'ipronics program',
+      'ipronics programmable',
+      'ipronics programmable photonics',
+      'ipronics programmable s.l.'
     ],
     
     // Processing Configuration

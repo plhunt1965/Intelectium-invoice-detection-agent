@@ -152,14 +152,7 @@ const SheetsManager = {
       const normalizedProveedor = (proveedor || '').toLowerCase().trim();
       
       // Special case: Reject ALL Ipronics/Intelectium invoices (they should not be registered)
-      const empresasEmisoras = [
-        'intelectium', 
-        'ipronics', 
-        'ipronics program', 
-        'ipronics programmable',
-        'ipronics programmable photonics'
-      ];
-      if (empresasEmisoras.some(empresa => normalizedProveedor.includes(empresa))) {
+      if (CONFIG.EMPRESAS_EMISORAS.some(empresa => normalizedProveedor.includes(empresa))) {
         Log.info('Rejected: Invoice from Ipronics/Intelectium should not be registered', {
           proveedor: proveedor
         });
@@ -194,7 +187,7 @@ const SheetsManager = {
         }
         
         // Special check: If this is an Ipronics invoice, reject it even if number is different
-        if (empresasEmisoras.some(empresa => normalizedProveedor.includes(empresa) || rowProveedor.includes(empresa))) {
+        if (CONFIG.EMPRESAS_EMISORAS.some(empresa => normalizedProveedor.includes(empresa) || rowProveedor.includes(empresa))) {
           Log.info('Duplicate Ipronics invoice found (rejecting all Ipronics invoices)', {
             proveedor: proveedor,
             existingProveedor: values[i][0],

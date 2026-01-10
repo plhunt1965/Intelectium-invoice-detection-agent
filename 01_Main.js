@@ -291,14 +291,7 @@ function processMessage(requestId, msgData) {
     // Early rejection: Check for Ipronics/Intelectium in email subject/body before processing
     const emailContentForCheck = (msgData.subject || '') + ' ' + (msgData.body || '');
     const emailContentLower = emailContentForCheck.toLowerCase();
-    const empresasEmisoras = [
-      'intelectium', 
-      'ipronics', 
-      'ipronics program', 
-      'ipronics programmable',
-      'ipronics programmable photonics'
-    ];
-    if (empresasEmisoras.some(empresa => emailContentLower.includes(empresa))) {
+    if (CONFIG.EMPRESAS_EMISORAS.some(empresa => emailContentLower.includes(empresa))) {
       Log.info('Rejected early: Email mentions Intelectium/Ipronics (likely invoice issued by us)', {
         subject: msgData.subject
       });
@@ -407,14 +400,7 @@ function processMessage(requestId, msgData) {
       const emailContentLower = emailContent.toLowerCase();
       
       // Early rejection: Check for Ipronics/Intelectium in email content
-      const empresasEmisoras = [
-        'intelectium', 
-        'ipronics', 
-        'ipronics program', 
-        'ipronics programmable',
-        'ipronics programmable photonics'
-      ];
-      if (empresasEmisoras.some(empresa => emailContentLower.includes(empresa))) {
+      if (CONFIG.EMPRESAS_EMISORAS.some(empresa => emailContentLower.includes(empresa))) {
         Log.info('Rejected early: Email mentions Intelectium/Ipronics (likely invoice issued by us)', {
           subject: msgData.subject
         });
@@ -430,16 +416,16 @@ function processMessage(requestId, msgData) {
       invoiceData = VertexAI.extractInvoiceData(requestId, emailContent, CONFIG.MAX_RETRIES);
       checkTimeout(); // Check timeout after expensive operation
       
-      // STRICT validation for emails without attachments:
+      // Validation for emails without attachments:
       // 1. Must explicitly be marked as invoice (esFactura !== false)
-      // 2. Must have proveedor AND numeroFactura (both required for emails without PDFs)
+      // 2. Must have proveedor AND (numeroFactura OR importeTotal)
+      //    - Many receipts (Stripe, AWS) don't have formal invoice numbers but have amounts
       // 3. Must pass _isValidInvoice check
       if (invoiceData && 
           invoiceData.esFactura !== false && 
           invoiceData.proveedor && 
-          invoiceData.numeroFactura &&
           invoiceData.proveedor.trim() !== '' &&
-          invoiceData.numeroFactura.trim() !== '') {
+          (invoiceData.numeroFactura || invoiceData.importeTotal)) {
         // Get month folder using invoice date (preferred) or message date (fallback)
         const invoiceDate = _getInvoiceDate(invoiceData, msgData.date);
         const folder = DriveManager.getOrCreateMonthFolder(requestId, invoiceDate);

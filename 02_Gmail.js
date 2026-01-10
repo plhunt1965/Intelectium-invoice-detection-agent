@@ -29,23 +29,14 @@ const GmailManager = {
     const threads = [];
     
     try {
-      // CRITICAL FIX: Search month by month to ensure we don't miss emails
-      // Gmail search can miss emails if there are too many in one month
+      // Search month by month (includes keywords and labels internally)
+      // This is the only search needed - _searchByMonth already does label and keyword searches
       const monthlyThreads = this._searchByMonth(requestId, dateRange, usePriorityLabel);
       threads.push(...monthlyThreads);
       
-      // Also do the original search as a fallback (in case monthly search misses something)
-      if (usePriorityLabel && CONFIG.PRIORITY_LABEL) {
-        const labelThreads = this._searchWithLabel(requestId, CONFIG.PRIORITY_LABEL, dateRange);
-        threads.push(...labelThreads);
-        Log.info('Found emails with priority label (fallback)', { count: labelThreads.length });
-      }
+      Log.info('Found emails by month search', { count: monthlyThreads.length });
       
-      const keywordThreads = this._searchByKeywords(requestId, dateRange);
-      threads.push(...keywordThreads);
-      Log.info('Found emails by keywords (fallback)', { count: keywordThreads.length });
-      
-      // Remove duplicates
+      // Remove duplicates (monthly search may have some overlap between months at boundaries)
       const uniqueThreads = this._deduplicateThreads(threads);
       
       // Filter by date range (additional check since Gmail search may not be perfect)
