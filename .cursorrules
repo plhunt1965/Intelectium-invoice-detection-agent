@@ -1,0 +1,146 @@
+# Cursor Rules for Google Apps Script + clasp Projects
+
+## Project Context
+This is a Google Apps Script project managed with clasp (Command Line Apps Script Projects).
+
+## Critical Rules for clasp Projects
+
+### NEVER auto-execute these commands:
+- `clasp push` - Always show as a "Run" button, never execute automatically
+- `clasp deploy` - Always show as a "Run" button, never execute automatically
+- `clasp pull` - Always show as a "Run" button, never execute automatically
+- `clasp create` - Always ask for explicit confirmation first
+- `clasp open` - Safe to suggest, but don't auto-execute
+
+### Deployment Workflow (MANDATORY):
+1. User edits code in Cursor
+2. AI suggests changes and shows diff
+3. User reviews and approves changes
+4. AI provides: "To deploy, run: `clasp push`" (as clickable button)
+5. User manually clicks the button to push
+6. NEVER push automatically
+
+### When suggesting clasp commands:
+```bash
+# ✅ CORRECT - Show as runnab button
+To push your changes to Apps Script, run:
+clasp push
+
+# ❌ WRONG - Don't auto-execute
+[Auto-executing: clasp push...]
+```
+
+## Google Apps Script Environment Constraints
+
+### JavaScript Version:
+- Google Apps Script uses V8 runtime (modern ES6+ supported)
+- However, some ES6+ features may not work
+- Test thoroughly before deploying
+
+### NO Node.js features:
+- ❌ No `require()` or `import` statements
+- ❌ No npm packages
+- ❌ No Node.js built-ins (fs, path, etc.)
+- ✅ Only Google Apps Script services (GmailApp, DriveApp, etc.)
+
+### Execution Limits:
+- 6-minute maximum execution time per run
+- 30-minute maximum for custom functions in Sheets
+- Quota limits on API calls (check quotas.google.com)
+
+### No async/await in older projects:
+- Some Apps Script projects don't support async/await
+- Use synchronous code or callbacks instead
+- If user's project has asyyou can use it
+
+## File Management
+
+### NEVER modify without permission:
+- `appsscript.json` - Project manifest
+- `.clasp.json` - clasp configuration
+- File names or structure
+
+### ALWAYS ask before:
+- Creating new files
+- Renaming files
+- Deleting files
+- Changing file order (affects execution order in Apps Script)
+
+## Code Suggestions
+
+### When suggesting code changes:
+1. Show the EXACT diff (before/after)
+2. Explain WHY the change is needed
+3. Highlight any potential breaking changes
+4. Wait for user approval
+5. Provide clasp push command as button (don't auto-execute)
+
+### For configuration changes:
+1. Show current value vs new value
+2. Explain the impact
+3. Warn about any risks (quota usage, breaking changes, etc.)
+4. Get explicit approval
+
+## Safety Checklist
+
+Before suggesting to push code:
+- [ ] Code is syntactically correct
+- [ ] No Node.js-specific code
+- [ ] No breaking changes to existing functionality
+- [ ] User has reviewed and approved changes
+- [ ] Provided `clasp push` as a runnable button (not auto-executed)
+
+## Best Practices
+
+### Version Control:
+- Encourage user to commit to git before pushing to Apps Script
+- Suggest: `git add . && git commit -m "description"` before `clasp push`
+
+### Testing:
+- Remind user to test in Apps Script web interface after pushing
+- Suggest using Logger.log() for debugging
+- Recommend running test functions before production
+
+### Backup:
+- Before major changes, suggest: `clasp pull` to backup current version
+- Recommend keeping local backups of critical files
+
+## Example Workflow
+
+When user asks to "deploy changes":
+```
+I've prepared the following changes:
+
+[Show diff of changes]
+
+To deploy these changes:
+
+1. Review the changes above
+2. Commit to git (recommended):
+   git add .
+   git commit -m "Your commit message"
+
+3. Push to Apps Script:
+   clasp push
+
+4. Test in the Apps Script editor:
+   clasp open
+
+Would you like me to explain any of these changes?
+```
+
+## Red Flags - Always Ask First
+
+🚨 User wants to:
+- Change authenticion scopes
+- Modify triggers
+- Change OAuth scopes in appsscript.json
+- Delete existing code
+- Restructure project files
+- Change deployment settings
+
+→ Always explain implications and ask for explicit confirmation
+
+## Summary
+
+**Golden Rule**: Treat `clasp push` like `git push` - NEVER auto-execute. Always provide as a runnable command and let the user trigger it manually.
