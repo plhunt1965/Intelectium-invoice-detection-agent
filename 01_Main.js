@@ -26,6 +26,7 @@ function processInvoiceEmails() {
   // Track if time limit was reached for auto-recovery trigger
   let isTimeLimitReached = false;
   let allThreads = [];
+  let threadsToProcess = [];
   
   try {
     // Search for invoice emails
@@ -59,7 +60,7 @@ function processInvoiceEmails() {
     });
     
     // Balance threads across months (take proportionally from each month)
-    let threadsToProcess = [];
+    threadsToProcess = [];
     const maxThreads = Math.min(threads.length, CONFIG.MAX_THREADS_PER_RUN);
     const months = Object.keys(threadsByMonth).sort(); // Sort to ensure deterministic order
     const threadsPerMonth = Math.ceil(maxThreads / months.length);
@@ -236,9 +237,24 @@ function processInvoiceEmails() {
     throw error;
     
   } finally {
-    // AUTO-RECOVERY TRIGGER: If time limit reached and there are remaining threads, schedule next run
-    if (isTimeLimitReached && allThreads.length > 0) {
+    // AUTO-RECOVERY TRIGGER: Create trigger if there are remaining threads to process
+    // This happens in two cases:
+    // 1. Time limit reached (isTimeLimitReached = true)
+    // 2. More threads available than MAX_THREADS_PER_RUN (processed only 50, but there are more)
+    const hasRemainingThreads = allThreads.length > (threadsToProcess ? threadsToProcess.length : 0);
+    const shouldCreateTrigger = (isTimeLimitReached || hasRemainingThreads) && allThreads.length > 0;
+    
+    if (shouldCreateTrigger) {
       try {
+        const reason = isTimeLimitReached 
+          ? 'Time limit reached' 
+          : `Only processed ${threadsToProcess ? threadsToProcess.length : 0} of ${allThreads.length} threads (MAX_THREADS_PER_RUN limit)`;
+        Log.info('Creating auto-recovery trigger', {
+          reason: reason,
+          totalThreads: allThreads.length,
+          processedThreads: threadsToProcess ? threadsToProcess.length : 0,
+          remainingThreads: allThreads.length - (threadsToProcess ? threadsToProcess.length : 0)
+        });
         setupNextTrigger(requestId);
       } catch (triggerError) {
         Log.error('Failed to setup auto-recovery trigger', {
@@ -761,7 +777,7 @@ function processMessage(requestId, msgData) {
     // Check if invoice already exists (by number, provider, or file URL)
     // This is the definitive check after we have extracted data
     if (SheetsManager.invoiceExists(invoiceData.numeroFactura, invoiceData.proveedor, fileUrl)) {
-      Log.info('Invoice already exists in sheet - skipping', {
+      Log.warn('Invoice already exists in sheet - skipping', {
         numeroFactura: invoiceData.numeroFactura,
         proveedor: invoiceData.proveedor,
         fileUrl: fileUrl
@@ -776,6 +792,9 @@ function processMessage(requestId, msgData) {
           Log.warn('Could not clean up duplicate PDF file', { error: e.message });
         }
       }
+      
+      // CRITICAL FIX: Mark email as processed IMMEDIATELY to prevent reprocessing in next execution
+      Storage.markEmailProcessed(msgData.messageId);
       
       return null;
     }

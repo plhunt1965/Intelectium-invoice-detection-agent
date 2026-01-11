@@ -319,6 +319,64 @@ function DIAGNOSTIC_ClearProcessedEmails() {
 }
 
 /**
+ * Cancel all automatic triggers for processInvoiceEmails
+ * Use this when you want to stop automatic processing
+ */
+function STOP_AUTOMATIC_TRIGGERS() {
+  console.log('🛑 Stopping all automatic triggers...');
+  
+  try {
+    const allTriggers = ScriptApp.getProjectTriggers();
+    const processInvoiceTriggers = allTriggers.filter(trigger => 
+      trigger.getHandlerFunction() === 'processInvoiceEmails'
+    );
+    
+    console.log(`   Found ${processInvoiceTriggers.length} trigger(s) for processInvoiceEmails`);
+    
+    let deletedCount = 0;
+    let failedCount = 0;
+    
+    processInvoiceTriggers.forEach(trigger => {
+      try {
+        ScriptApp.deleteTrigger(trigger);
+        deletedCount++;
+        console.log(`   ✅ Deleted trigger: ${trigger.getUniqueId()}`);
+      } catch (error) {
+        failedCount++;
+        console.log(`   ❌ Failed to delete trigger ${trigger.getUniqueId()}: ${error.message}`);
+      }
+    });
+    
+    console.log(`\n📊 Summary:`);
+    console.log(`   Deleted: ${deletedCount}`);
+    console.log(`   Failed: ${failedCount}`);
+    
+    if (deletedCount > 0) {
+      console.log('\n✅ Automatic triggers stopped. processInvoiceEmails will not run automatically.');
+    } else if (processInvoiceTriggers.length === 0) {
+      console.log('\nℹ️  No automatic triggers found. processInvoiceEmails is already stopped.');
+    } else {
+      console.log('\n⚠️  Could not delete all triggers. Check permissions.');
+    }
+    
+    return {
+      success: true,
+      deleted: deletedCount,
+      failed: failedCount,
+      total: processInvoiceTriggers.length
+    };
+    
+  } catch (error) {
+    console.log(`\n❌ Error stopping triggers: ${error.message}`);
+    console.log('   Check OAuth scope: https://www.googleapis.com/auth/script.scriptapp');
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+/**
  * Force reprocess all emails in date range (clears processed list first)
  */
 function FORCE_REPROCESS_ALL() {
